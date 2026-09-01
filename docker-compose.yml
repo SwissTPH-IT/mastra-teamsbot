@@ -1,0 +1,44 @@
+services:
+  mastra:
+    build: .
+    container_name: mastra-app
+    ports:
+      - "4111:4111"
+    env_file:
+      - .env
+    environment:
+      # Host CA bundle includes the corporate TLS-interception CA;
+      # without it, HTTPS from inside the container fails cert verification.
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      # Erlaubt dem Browser den direkten Weg zu Mastra (siehe README, Variante B).
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+    volumes:
+      # Persistiert die LibSQL-Datenbankdatei (Memory, Threads, Traces) sowie
+      # die hochgeladenen Belege und die erzeugten JSON-Dateien.
+      - ./data:/app/data
+      # Live-Reload gibt es hier nicht: das Image ist ein Produktions-Build
+      # (mastra build -> node .mastra/output/index.mjs). Für Live-Reload lokal
+      # `npm run dev` außerhalb von Docker benutzen.
+    healthcheck:
+      # Die Chat-Route existiert nur bei POST; /api ist ein GET-Endpunkt.
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4111/api').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: receipt-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      # Servicename statt localhost: der Aufruf passiert im Container.
+      MASTRA_URL: http://mastra:4111
+      MASTRA_AGENT_ID: receiptChatAgent
+    depends_on:
+      mastra:
+        condition: service_healthy
+    restart: unless-stopped

@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Environment (nur .env.example gehört ins Repo)
+.env
+.env.*
+!.env.example
+
+# Build-Output
+dist/
+.mastra/
+.next/
+*.tsbuildinfo
+
+# Laufzeit-Daten (LibSQL-DB, Uploads, erzeugte Belegs-JSONs)
+data/
+!data/.gitkeep
+db-data/
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Tooling / OS
+.claude/
+__pycache__/
+.DS_Store
