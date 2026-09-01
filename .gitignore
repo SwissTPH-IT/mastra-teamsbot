@@ -17,6 +17,9 @@ data/
 !data/.gitkeep
 db-data/
 
+# Generiertes Teams-Paket (enthaelt die echte TEAMS_APP_ID)
+teams-app/dist/
+
 # Logs
 *.log
 npm-debug.log*

@@ -25,10 +25,47 @@ type ReceiptOutcome = {
   error?: string;
 };
 
-/** Anhänge, die ein Vision-Modell tatsächlich als Beleg lesen kann. */
+/**
+ * Anhänge, die als Beleg in Frage kommen.
+ *
+ * Der mimeType allein reicht als Kriterium nicht: ein direkt in die Teams-
+ * Nachricht eingefügtes Bild kommt als `contentType: "image/*"` herein – mit
+ * Stern, ohne konkretes Format. Deshalb hier nur die grobe Klasse prüfen; das
+ * echte Format bestimmt `detectImageMime()` später an den Bytes.
+ */
 function isReceiptImage(attachment: { type: string; mimeType?: string }): boolean {
-  if (attachment.type !== 'image') return false;
-  return Boolean(attachment.mimeType && attachment.mimeType in ALLOWED_UPLOAD_TYPES);
+  if (attachment.type === 'image') return true;
+  // Hochgeladene Dateien ohne erkennbare Endung landen als "file" mit
+  // application/octet-stream. Ob wirklich ein Bild drinsteckt, klärt
+  // detectImageMime() – hier nur nicht vorschnell aussortieren.
+  return attachment.type === 'file' && attachment.mimeType === 'application/octet-stream';
+}
+
+/**
+ * Bildformat an den Magic Bytes erkennen.
+ *
+ * Verlässlicher als der von Teams gemeldete contentType und gleichzeitig die
+ * Validierung: was hier nicht erkannt wird, ist keines der vier Formate, die
+ * `storeUpload()` akzeptiert.
+ */
+function detectImageMime(bytes: Uint8Array): string | undefined {
+  const startsWith = (...signature: number[]) =>
+    signature.every((byte, index) => bytes[index] === byte);
+
+  if (startsWith(0xff, 0xd8, 0xff)) return 'image/jpeg';
+  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
+  if (startsWith(0x47, 0x49, 0x46, 0x38)) return 'image/gif';
+  // WebP: "RIFF" an Position 0, "WEBP" an Position 8.
+  if (
+    startsWith(0x52, 0x49, 0x46, 0x46) &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return 'image/webp';
+  }
+  return undefined;
 }
 
 /**
@@ -98,6 +135,16 @@ function summarize(outcomes: ReceiptOutcome[]): string {
 export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
   const images = message.attachments.filter(isReceiptImage);
 
+  // Ohne das ist ein aussortierter Anhang von "gar kein Anhang" nicht zu
+  // unterscheiden – und der Nutzer sieht nur, dass der Agent antwortet.
+  if (message.attachments.length > 0) {
+    ctx.mastra?.getLogger()?.debug(
+      `[teams] ${images.length}/${message.attachments.length} Anhänge als Beleg erkannt: ${message.attachments
+        .map(a => `${a.name ?? 'ohne Namen'} (type=${a.type}, mime=${a.mimeType ?? 'unbekannt'})`)
+        .join(', ')}`,
+    );
+  }
+
   if (images.length === 0) {
     await defaultHandler(thread, message);
     return;
@@ -132,11 +179,20 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
         );
       }
 
+      // Teams meldet für eingefügte Bilder nur "image/*", deshalb das Format an
+      // den Bytes bestimmen statt dem gemeldeten mimeType zu vertrauen.
+      const mimeType = detectImageMime(bytes);
+      if (!mimeType) {
+        throw new Error(
+          `Dateiformat nicht erkannt (Teams meldete "${attachment.mimeType ?? 'unbekannt'}"). Erlaubt: ${Object.keys(
+            ALLOWED_UPLOAD_TYPES,
+          ).join(', ')}`,
+        );
+      }
+
       // storeUpload() validiert Typ und Größe und vergibt die uploadId – exakt
       // derselbe Pfad wie beim Upload aus dem Web-Frontend.
-      const stored = await storeUpload(
-        new File([bytes as BlobPart], name, { type: attachment.mimeType }),
-      );
+      const stored = await storeUpload(new File([bytes as BlobPart], name, { type: mimeType }));
 
       const run = await workflow.createRun();
       const result = await run.start({
