@@ -88,6 +88,7 @@ Key pieces (`src/mastra/`):
 - **In Mastra v1 the mechanism is `RequestContext`**, from `@mastra/core/request-context` — not `runtimeContext`.
 - A workflow with a `stateSchema` **requires `initialState` at `run.start()`**, else it throws `Invalid initial data`. Hence `initialReviewState`.
 - `drizzle-kit`'s migration journal lives in its own `drizzle` schema. Putting it in `app` collides with the `CREATE SCHEMA "app"` in `drizzle/0000_*.sql` (Postgres 42P06).
+- **Two Railway services build from this repo**, distinguished only by their config file: the agent uses `railway.json` (default), the prune cron uses `/railway.prune.json` (set per service under Settings). Railway config-as-code *overrides* dashboard settings, so a start command typed into the UI would be ignored — the second config file is not optional.
 - The runtime image contains only `.mastra/output` — **no `package.json`, so no `npm run`**. `scripts/*.mjs` are plain ESM copied into that bundle and resolve `pg` / `drizzle-orm` / `@mastra/pg` from the bundle's own `node_modules`.
 
 ### Multi-tenancy — do not weaken this

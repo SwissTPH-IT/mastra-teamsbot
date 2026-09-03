@@ -354,17 +354,28 @@ ist damit Pflicht. Für eine Multi-Tenant-App beides gemeinsam umstellen.
 
 ## Deployment auf Railway
 
-Zwei Services im Repo-Projekt plus die Datenbank:
+Drei Services pro Environment – zwei davon aus **demselben** Repo, unterschieden
+nur durch ihre Config-Datei:
 
 ```
 Railway-Projekt
 ├── Environment "staging"
-│   ├── Postgres            (Datenbank-Service)
-│   ├── mastra-agent        DATABASE_URL = ${{ Postgres.DATABASE_URL }}
-│   └── mastra-prune        Cron, täglich
+│   ├── Postgres        Datenbank-Service, Backups an
+│   ├── mastra-agent    Repo → railway.json         (Default)
+│   └── mastra-prune    Repo → railway.prune.json   (Settings → Config File)
 └── Environment "production"
     └── … dieselben drei, eigene Datenbank
 ```
+
+| | `mastra-agent` | `mastra-prune` |
+|---|---|---|
+| Config-Datei | `railway.json` (Default) | `/railway.prune.json` (explizit setzen!) |
+| Start | Server | `scripts/prune.mjs`, terminiert |
+| `preDeployCommand` | Migrationen | – |
+| Health-Check | `/healthz` | – |
+| Cron | – | `0 3 * * *` |
+| Volume | `/app/data` | – |
+| `DATABASE_URL` | `${{ Postgres.DATABASE_URL }}` | dieselbe Referenz |
 
 ### 1. Postgres anlegen
 
@@ -401,13 +412,51 @@ Ein **Volume auf `/app/data`** mounten – dort liegen die Belegbilder. Ohne das
 sind sie nach jedem Redeploy weg, auch wenn die Belegdaten in Postgres
 überleben. Siehe „Offene Lücke: Objektspeicher".
 
-### 3. Prune-Service
+### 3. Prune-Service (Cron)
 
-Zweiter Service aus demselben Repo, als Cron:
+Zweiter Service aus **demselben Repo** – gleiches Image, anderer Start-Befehl.
 
-- **Settings → Cron Schedule:** `0 3 * * *`
-- **Start Command:** `node .mastra/output/scripts/prune.mjs`
-- `DATABASE_URL = ${{ Postgres.DATABASE_URL }}`
+> **Der Punkt, an dem es sonst schiefgeht:** Railway liest per Default die
+> `railway.json` im Repo-Root, und laut Doku gilt *„Configuration defined in code
+> will always override values from the dashboard."* Ein zweiter Service aus
+> demselben Repo würde also `startCommand`, `preDeployCommand` und
+> `healthcheckPath` des Agenten erben – und ein im Dashboard gesetzter
+> Start-Befehl würde daran **nichts** ändern. Der Cron-Job startete dann den
+> Server statt des Prune-Skripts, liefe nie zu Ende, und weil Railway einen
+> neuen Lauf überspringt, solange der vorherige noch läuft, liefe er genau
+> einmal und danach nie wieder.
+
+Deshalb hat dieser Service eine eigene Config-Datei, `railway.prune.json`:
+
+```json
+{
+  "deploy": {
+    "startCommand": "node .mastra/output/scripts/prune.mjs",
+    "cronSchedule": "0 3 * * *",
+    "restartPolicyType": "NEVER"
+  }
+}
+```
+
+Kein `preDeployCommand` (Migrationen gehören zum Agent-Deploy, nicht zu jedem
+Cron-Lauf), kein `healthcheckPath` (der Job hört auf keinem Port), und
+`restartPolicyType: NEVER` – ein Cron-Job soll terminieren, nicht neu starten.
+`scripts/prune.mjs` schliesst seinen Pool im `finally`, beendet sich also sauber,
+wie Railway es für Cron-Services verlangt.
+
+**Einrichtung:**
+
+1. **New → GitHub Repo**, dasselbe Repo wählen. Service z. B. `mastra-prune` nennen.
+2. **Settings → Config-as-code / Railway Config File:** `/railway.prune.json`
+   eintragen. Der Pfad ist absolut ab Repo-Root und folgt dem Root Directory
+   **nicht** – das steht so in der Railway-Monorepo-Doku.
+3. **Variables:** `DATABASE_URL = ${{ Postgres.DATABASE_URL }}`, optional
+   `RETENTION_SPANS` / `RETENTION_SNAPSHOTS` / `RETENTION_MESSAGES`.
+4. Kein Volume, keine Domain, kein Health-Check.
+
+Der Zeitplan steht in `cronSchedule` und damit im Repo, nicht im Dashboard – aus
+demselben Grund: Config-as-Code gewinnt ohnehin. Railways Minimum ist 5 Minuten,
+Zeitzone ist UTC.
 
 Ungebremst wachsen zu lassen ist keine Option: die Span-Tabellen wachsen um
 Grössenordnungen schneller als die Belege – pro Beleg fallen Dutzende Spans an,
@@ -427,6 +476,16 @@ Zwei Railway-Environments mit je **eigenem** Postgres-Service. Der Ablauf:
 Eine Migration, die auf Staging durchläuft, läuft auf Produktion durch – solange
 beide Environments dieselbe Postgres-Major-Version fahren. Der lokale
 Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
+
+**Reihenfolge beim allerersten Deploy:** zuerst Postgres, dann `mastra-agent`
+(dessen `preDeployCommand` legt beide Schemas an), erst danach `mastra-prune`.
+Der Prune-Job auf einer leeren Datenbank würde sonst über fehlende Tabellen
+stolpern.
+
+**Hinweis zur Haltbarkeit:** Railway markiert Config-as-Code (`railway.json`) als
+deprecated, mit Umstellung auf Infrastructure as Code bis **1. Dezember 2026**.
+Bis dahin funktioniert das Setup wie beschrieben; danach werden beide Dateien in
+das neue Format zu überführen sein.
 
 ### Umgebungsvariablen
 
