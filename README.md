@@ -1,10 +1,11 @@
 # Belegerfassung – Mastra + assistant-ui, vollständig in Docker
 
-Zwei Container, ein `docker compose up`:
+Drei Container, ein `docker compose up`:
 
 | Service | Port | Was drin läuft |
 |---|---|---|
-| `mastra` | 4111 | Mastra-Server: Agenten, `receipt-workflow`, Upload-Endpunkte, Studio-UI |
+| `postgres` | 5432 | Postgres 17: Schema `mastra` (von Mastra verwaltet) und Schema `app` (Fachdaten) |
+| `mastra` | 4111 | Mastra-Server: Agenten, Workflows, Upload-Endpunkte, Studio-UI |
 | `frontend` | 3000 | Next.js + [assistant-ui](https://www.assistant-ui.com/): das Endnutzer-Interface |
 
 Ein Endnutzer öffnet **http://localhost:3000**, zieht ein Belegfoto ins Eingabefeld
@@ -32,6 +33,10 @@ und sieht die extrahierten Daten als Karte im Chat. Nichts weiter zu konfigurier
    ```bash
    docker compose up --build
    ```
+
+   Der `mastra`-Container führt vor dem Start `npm run db:deploy` aus – dieselbe
+   Reihenfolge wie auf Railway (`preDeployCommand`). Die Schemas `app` und
+   `mastra` entstehen dabei; nichts davon passiert beim ersten Request.
 
 4. Öffnen:
 
@@ -76,18 +81,37 @@ jedes Ergebnis erscheint eine eigene Karte.
 
 | Datei | Zweck |
 |---|---|
-| `index.ts` | Mastra-Instanz: Agenten, Workflow, `chatRoute()`, Upload-Routen, CORS |
+| `index.ts` | Mastra-Instanz: Agenten, Workflows, `chatRoute()`, Upload- und Health-Routen, CORS |
 | `agents/receipt-chat-agent.ts` | Gesprächspartner des Frontends; ruft das Extraktions-Tool auf |
 | `agents/receipt-agent.ts` | Vision-Agent + `receiptSchema` – tippt den Beleg ab, interpretiert nicht |
+| `agents/receipt-correction-agent.ts` | Wendet eine Freitext-Korrektur auf einen Kandidatensatz an |
 | `agents/assistant-agent.ts` | Beispiel-Agent aus dem Ausgangs-Stack (Wetter-Tool, Working Memory) |
-| `agents/teams-agent.ts` | Der Microsoft-Teams-Bot: Adapter, Handler-Registrierung, Instructions |
-| `channels/teams-receipt-handler.ts` | Teams-Anhang → `upload-store` → `receipt-workflow` → Antwort im Thread |
+| `agents/teams-agent.ts` | Der Microsoft-Teams-Bot: Adapter, Handler-Registrierung, DB-Tools, Instructions |
+| `channels/teams-receipt-handler.ts` | Teams-Anhang → Review-Workflow; und die Antwort des Nutzers → `run.resume()` |
 | `model.ts` | Eine Stelle für die Modellwahl (`MASTRA_MODEL`) |
-| `workflows/receipt-workflow.ts` | Laden → Extrahieren → JSON schreiben |
-| `tools/extract-receipt-tool.ts` | Brücke Chat → Workflow: löst `uploadId`s zu Pfaden auf |
+| `workflows/receipt-extraction-workflow.ts` | Laden → Extrahieren → JSON schreiben. Unverändert, vom Web-Pfad benutzt |
+| `workflows/receipt-review-workflow.ts` | Extraktion → Vorlage → (Korrektur → erneute Vorlage)\* → DB-Write |
+| `receipts/candidate.ts` | Marker/Strings → typisierter Kandidatensatz; Beträge, Datum, Währung, Confidence |
+| `tools/extract-receipt-tool.ts` | Brücke Chat → Extraktions-Workflow: löst `uploadId`s zu Pfaden auf |
+| `tools/receipt-db-tools.ts` | `create-` / `list-` / `search-` / `update-receipt` |
+| `tools/tool-context.ts` | `requireUserId()` – die einzige Stelle, an der ein Tool an die `user_id` kommt |
 | `receipts/upload-store.ts` | Ablage der Uploads, Validierung der `uploadId` |
 | `server/receipt-routes.ts` | `POST /receipts/upload`, `GET /receipts/:uploadId/file` |
-| `storage.ts` | LibSQL-Dateispeicher im Volume `./data` |
+| `server/health-route.ts` | `GET /healthz` – inklusive `SELECT 1` gegen die Datenbank |
+| `storage.ts` | `PostgresStore` im Schema `mastra`, mit `disableInit: true` |
+
+### Datenbank (`src/db/`, `drizzle/`, `scripts/`)
+
+| Datei | Zweck |
+|---|---|
+| `db/pool.ts` | Der eine `pg.Pool`, den `PostgresStore` und Drizzle sich teilen |
+| `db/schema.ts` | Drizzle-Schema, vollständig in `pgSchema('app')` |
+| `db/receipts.ts` | Repository. Jede Funktion nimmt `userId` als erstes Pflichtargument |
+| `drizzle.config.ts` | `schemaFilter: ['app']` – der Diff sieht die `mastra_*`-Tabellen nie |
+| `drizzle/*.sql` | Generierte Migrationen, eingecheckt |
+| `scripts/migrate.mjs` | Drizzle-Migrationen + `storage.init()`. Plain ESM, läuft im Laufzeit-Image |
+| `scripts/prune.mjs` | Retention über `storage.prune()`. Hier stehen die Policies |
+| `tests/suspend-resume.test.ts` | Suspendierter Run überlebt einen Instanz-Neuaufbau |
 
 ### Frontend (`frontend/`)
 
@@ -109,17 +133,61 @@ ausgeschlossen), zum Weiterbauen aber nützlich.
 
 ## Persistenz
 
-Alles liegt im Host-Verzeichnis `./data`:
+Eine Postgres-Instanz, zwei getrennte Schemas, ein `DATABASE_URL`:
 
 ```
-data/
-├── mastra.db          Threads, Messages, Memory, Traces
-├── uploads/           Rohbelege, Dateiname = uploadId
-└── receipts/          Ergebnis-JSONs, ein File pro Beleg
+Postgres
+├── schema "mastra"   von PostgresStore verwaltet
+│   ├── mastra_workflow_snapshot   ← hier wartet ein suspendierter Review-Run
+│   ├── mastra_threads / _messages / _resources
+│   └── mastra_ai_spans, …          (43 Tabellen)
+├── schema "app"      von uns über Drizzle migriert
+│   ├── receipts            die bestätigten Belege
+│   └── pending_reviews     Zeiger Teams-Thread → runId
+└── schema "drizzle"  Journal-Tabelle des Migrators
 ```
 
-Überlebt `docker compose down` und Rebuilds. Zum Zurücksetzen des Chatverlaufs
-`data/mastra.db*` löschen, zum Aufräumen der Bilder `data/uploads/`.
+`public` bleibt leer. Das ist kein Kosmetikpunkt: der Drizzle-Migrations-Diff ist
+über `schemaFilter: ['app']` (`drizzle.config.ts`) auf `app` begrenzt und sieht die
+43 `mastra_*`-Tabellen deshalb nie – sonst schlüge er vor, sie zu droppen.
+
+Die Belegbilder liegen weiterhin als Dateien unter `./data/uploads/`; in der
+Datenbank steht nur die Referenz.
+
+### Warum der Kandidatensatz in die Datenbank gehört
+
+Zwischen „Beleg gelesen, bitte prüfen" und der Antwort des Nutzers können Stunden
+liegen – und dazwischen passiert womöglich ein Railway-Deploy. Der Kandidatensatz
+liegt deshalb im Workflow-State und damit in `mastra_workflow_snapshot`, nicht im
+Gesprächsverlauf und nicht im Prozessspeicher. Sonst entschiede die Kontextlänge
+darüber, ob eine Buchung korrekt landet.
+
+Belegt wird das von `tests/suspend-resume.test.ts`: Run starten, suspendieren,
+Mastra-Instanz komplett wegwerfen und neu bauen, aus dem Store fortsetzen – der
+wiederhergestellte Kandidatensatz muss identisch sein.
+
+### Ein Pool für alles
+
+`PostgresStore` und Drizzle laufen über denselben `pg.Pool` (`src/db/pool.ts`).
+Die Mastra-Referenz beschreibt genau diesen Fall für die Integration mit einem
+ORM. Konsequenz: `store.close()` schliesst den Pool **nicht**, der Lifecycle liegt
+bei uns.
+
+Die Poolgrösse steht auf 8 (`DB_POOL_MAX`), nicht auf dem `PostgresStore`-Default
+von 20: eine kleine Railway-Instanz erlaubt rund 20 Verbindungen insgesamt, und
+davon brauchen auch der Migrations-Job und später das Frontend welche.
+
+### Offene Lücke: Objektspeicher
+
+Es gibt keinen. `receipts.file_reference` enthält vorerst
+`local:uploads/<uploadId>` – den Pfad im Volume, in dem `upload-store.ts` die
+Datei ohnehin ablegt. Binärdaten liegen bewusst **nicht** in der Datenbank.
+
+Das Präfix-Schema (`local:` / später `s3:`) ist so gewählt, dass ein Umzug auf
+einen Objektspeicher eine Datenmigration über eine Spalte wird und keine
+Schema-Änderung. Bis dahin gilt: **ohne Volume auf `/app/data` sind die
+Originalbilder nach jedem Redeploy weg**, auch wenn die Belegdaten in Postgres
+überleben.
 
 ## Zwei Wege vom Browser zu Mastra
 
@@ -178,25 +246,98 @@ npm run build       # mastra build --studio
 - **Uploads werden nie gelöscht.** `data/uploads/` wächst monoton; ein
   Aufräum-Job wäre der nächste Schritt.
 
-## Microsoft Teams
+## Microsoft Teams: der Human-in-the-Loop-Flow
 
-Zweiter Weg zum gleichen Workflow: `teamsAgent` hängt über
-[`@chat-adapter/teams`](https://chat-sdk.dev/adapters/official/teams) an
-`channels.adapters.teams`. Schickt jemand in Teams ein Belegfoto, greift
-`channels/teams-receipt-handler.ts` es ab, legt es über denselben `upload-store`
-wie das Web-Frontend ab und startet den `receipt-workflow`. Die Antwort landet als
-Text im Thread. Nachrichten *ohne* Bild gehen an den Standard-Handler, also an das
-Modell.
+Schickt jemand in Teams ein Belegfoto, greift `channels/teams-receipt-handler.ts`
+es ab, legt es über denselben `upload-store` wie das Web-Frontend ab und startet
+den `receipt-review-workflow`. Der pausiert, legt die gelesenen Werte zur
+Kontrolle vor und schreibt **erst nach Bestätigung** in die Datenbank.
 
 ```
-Teams-Nachricht mit Bildanhang
+Teams-Nachricht MIT Bildanhang
   └─► POST /api/agents/teams-agent/channels/teams/webhook
         └─► handleTeamsReceipt
-              ├─ attachment.fetchData()      Bytes holen (authentifiziert)
-              ├─ storeUpload()               Datei nach <RECEIPT_DATA_DIR>/uploads
-              ├─ receipt-workflow            load → extract → write-json
-              └─ thread.post(summary)        "✅ Migros · 2026-03-14 · CHF 42.10"
+              ├─ requestContext.set('userId', message.author.userId)
+              ├─ attachment.fetchData()   Bytes holen (authentifiziert)
+              ├─ sha256(bytes)            der Idempotenz-Key
+              ├─ storeUpload()            Datei nach <RECEIPT_DATA_DIR>/uploads
+              ├─ app.pending_reviews      Zeiger Thread → runId (vor dem Start!)
+              └─ run.start()
+                    └─ receipt-extraction-workflow   (unverändert)
+                    └─ review-candidate  ──► suspend ──► Vorlage im Thread
+                                                          "Migros · 2026-03-14 · CHF 42.10
+                                                           passt? / Korrektur? / abbrechen?"
+
+Teams-Nachricht OHNE Bildanhang
+  └─► handleTeamsReceipt
+        ├─ offener pending_review für diesen Thread?
+        │    ja  → Antwort einordnen, run.resume()
+        │           ├─ "passt"      → persist-receipt → app.receipts  ✅
+        │           ├─ Korrektur    → Freitext anwenden → ERNEUT vorlegen
+        │           └─ "abbrechen"  → nichts gespeichert
+        └─ nein → Standard-Handler: der Agent antwortet, mit den DB-Tools
 ```
+
+### Warum nach einer Korrektur nochmal nachgefragt wird
+
+Eine Freitext-Korrektur wie „das Datum ist der 3., nicht der 8." muss geparst
+werden, und dieses Parsing kann danebengehen. Die erneute Vorlage macht das
+Ergebnis sichtbar, bevor es persistent wird. Nach `RECEIPT_MAX_CORRECTION_ROUNDS`
+Runden (Default 3) bricht der Workflow ohne Speichern ab – dann ist nicht das
+Parsing das Problem, sondern das Foto.
+
+Die Einordnung der Antwort (`classifyReply` im Handler) ist bewusst
+deterministisch und nicht per Modell: ob eine Buchung geschrieben wird, soll nicht
+davon abhängen, wie ein LLM gerade gelaunt ist. Nur eine kurze, eindeutige
+Zustimmung zählt als Zustimmung; „ja, aber das Datum stimmt nicht" ist eine
+Korrektur. Im Zweifel eine Rückfrage zu viel statt einer falschen Buchung.
+
+### Mandantentrennung
+
+Die `user_id` kommt aus `message.author.userId` – aus dem signierten
+Bot-Framework-Payload, serverseitig. Sie geht über den `RequestContext` (in
+Mastra v1 heisst der Mechanismus so, nicht `runtimeContext`) an Workflow-Steps
+und Agent-Tools.
+
+```
+message.author.userId
+  └─ ctx.requestContext.set('userId', …)      im Channel-Handler
+       ├─ run.start({ requestContext })        → Workflow-Steps
+       └─ defaultHandler(...)                  → Agent → Tools
+            └─ requireUserId(ctx)              src/mastra/tools/tool-context.ts
+                 └─ listReceipts(userId, …)    src/db/receipts.ts
+```
+
+In **keinem** `inputSchema` eines Tools steht eine `userId` – das Modell kann sie
+also nicht setzen. Jede Repository-Funktion nimmt sie als erstes Pflichtargument
+und hängt sie an jedes `WHERE`, auch bei `updateReceipt`: eine fremde `receiptId`
+trifft dadurch 0 Zeilen statt einer fremden Zeile. Bittet ein Nutzer den Agenten
+um die Belege eines Kollegen, ist das keine Frage der Zurückhaltung des Modells –
+es geht schlicht nicht.
+
+### Die DB-Tools
+
+Ein kleiner, eng typisierter Satz. Bewusst **kein** Tool, das beliebiges SQL
+ausführt.
+
+| Tool | Zweck |
+|---|---|
+| `create-receipt` | Schreibt einen bestätigten Datensatz. Upsert gegen `(user_id, file_hash)`, nie ein blindes Insert. |
+| `list-receipts` | Die zuletzt erfassten Belege, optional auf einen Zeitraum eingegrenzt. |
+| `search-receipts` | Suche nach Händler, Kategorie, Belegart, Referenznummer; Zeitraum und Betragsspanne optional. |
+| `update-receipt` | Korrektur an einem bereits gespeicherten Beleg. |
+
+Fachdaten laufen ausschliesslich über Drizzle. `store.db` / `store.pool` werden
+nicht angefasst – die Referenz bezeichnet den Direktzugriff ausdrücklich als
+Umgehung der Storage-Logik für Low-Level-Sonderfälle.
+
+### Was der Web-Pfad davon merkt: nichts
+
+Der bestehende `receipt-workflow` heisst jetzt `receipt-extraction-workflow` und
+ist inhaltlich unverändert – er suspendiert nicht und schreibt weiterhin seine
+JSON-Datei. Das Frontend und `extract-receipt-tool.ts` sprechen weiter ihn an.
+Der Review-Workflow ruft ihn als ersten Schritt auf. Extraktionslogik gibt es
+damit weiterhin an genau einer Stelle.
 
 **Messaging-Endpoint für die Azure Bot Registration:**
 
@@ -213,34 +354,98 @@ ist damit Pflicht. Für eine Multi-Tenant-App beides gemeinsam umstellen.
 
 ## Deployment auf Railway
 
-Railway baut über das `Dockerfile` (siehe `railway.json`): Multi-Stage-Build,
-`mastra build --studio`, Start mit `node .mastra/output/index.mjs`. Der Server
-liest `process.env.PORT` und bindet auf `0.0.0.0` – beides Voraussetzung dafür,
-dass Railways Proxy den Container erreicht. Health-Check ist `GET /api`.
+Zwei Services im Repo-Projekt plus die Datenbank:
 
-1. Repo mit Railway verbinden.
-2. Alle Variablen aus der Tabelle unten in **Variables** eintragen.
-3. Ein **Volume** auf `/app/data` mounten – sonst sind LibSQL-DB, Uploads und
-   Belegs-JSONs nach jedem Redeploy weg. Alternativ `DATABASE_URL` auf eine
-   Turso-URL zeigen lassen (`libsql://…` + `DATABASE_AUTH_TOKEN`).
-4. Die von Railway vergebene Domain als Messaging-Endpoint in Azure eintragen
-   (Pfad siehe oben).
+```
+Railway-Projekt
+├── Environment "staging"
+│   ├── Postgres            (Datenbank-Service)
+│   ├── mastra-agent        DATABASE_URL = ${{ Postgres.DATABASE_URL }}
+│   └── mastra-prune        Cron, täglich
+└── Environment "production"
+    └── … dieselben drei, eigene Datenbank
+```
+
+### 1. Postgres anlegen
+
+**New → Database → PostgreSQL.** Danach in den Variablen des Agent-Service:
+
+```
+DATABASE_URL = ${{ Postgres.DATABASE_URL }}
+```
+
+Als **Referenz-Variable**, nicht als kopierter Connection String: Railway
+rotiert das Passwort beim Neuaufbau des Datenbank-Service, ein kopierter String
+wird dann still ungültig.
+
+Unter **Postgres → Settings → Backups** die Backups aktivieren. Ohne das ist eine
+versehentliche Migration nicht rückholbar.
+
+### 2. Agent-Service
+
+Baut über das `Dockerfile` (siehe `railway.json`). Wichtig sind drei Einträge
+dort:
+
+| Feld | Wert | Warum |
+|---|---|---|
+| `preDeployCommand` | `node .mastra/output/scripts/migrate.mjs` | Migrationen laufen nach dem Build und **vor** dem Umschalten auf die neue Version – nicht beim ersten Request |
+| `startCommand` | `node .mastra/output/index.mjs` | |
+| `healthcheckPath` | `/healthz` | prüft zusätzlich die Datenbankverbindung. **Nicht** `/health` – der Pfad ist von Mastra belegt und liefert `{"success":true}` ohne DB-Prüfung |
+
+Der Agent selbst migriert nichts: `PostgresStore` läuft mit `disableInit: true`
+(`src/mastra/storage.ts`). Das ist das in der
+[Mastra-Referenz](https://mastra.ai/reference/storage/postgresql) beschriebene
+CI/CD-Muster.
+
+Ein **Volume auf `/app/data`** mounten – dort liegen die Belegbilder. Ohne das
+sind sie nach jedem Redeploy weg, auch wenn die Belegdaten in Postgres
+überleben. Siehe „Offene Lücke: Objektspeicher".
+
+### 3. Prune-Service
+
+Zweiter Service aus demselben Repo, als Cron:
+
+- **Settings → Cron Schedule:** `0 3 * * *`
+- **Start Command:** `node .mastra/output/scripts/prune.mjs`
+- `DATABASE_URL = ${{ Postgres.DATABASE_URL }}`
+
+Ungebremst wachsen zu lassen ist keine Option: die Span-Tabellen wachsen um
+Grössenordnungen schneller als die Belege – pro Beleg fallen Dutzende Spans an,
+pro Beleg entsteht genau eine Zeile in `app.receipts`. Die Policies stehen in
+`scripts/prune.mjs` und sind über `RETENTION_*` justierbar, ohne den Agenten neu
+zu deployen. `app.receipts` hat bewusst keine Retention.
+
+### 4. Staging und Produktion
+
+Zwei Railway-Environments mit je **eigenem** Postgres-Service. Der Ablauf:
+
+1. Nach `staging` deployen. `preDeployCommand` fährt die Migration dort.
+2. Prüfen: `GET /healthz` muss `{"status":"ok","database":"up"}` liefern, und ein
+   Beleg muss in Teams durchlaufen (Vorlage → „passt" → Zeile in `app.receipts`).
+3. Erst dann nach `production` promoten.
+
+Eine Migration, die auf Staging durchläuft, läuft auf Produktion durch – solange
+beide Environments dieselbe Postgres-Major-Version fahren. Der lokale
+Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
 
 ### Umgebungsvariablen
 
 | Variable | Pflicht | Zweck |
 |---|---|---|
+| `DATABASE_URL` | **ja** | Postgres. Auf Railway als `${{ Postgres.DATABASE_URL }}` |
 | `MASTRA_MODEL` | ja | Modell als `<provider>/<model>`, muss vision-fähig sein |
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | ja (der passende) | Key des Providers aus `MASTRA_MODEL` |
 | `TEAMS_APP_ID` | für Teams | App-(Client-)ID der Azure Bot Registration |
 | `TEAMS_APP_PASSWORD` | für Teams | Client Secret dazu |
 | `TEAMS_APP_TENANT_ID` | für Teams | Tenant-ID; Pflicht wegen `appType: "SingleTenant"` |
+| `DB_POOL_MAX` | nein | Poolgrösse, Default 8. Höher nur mit grösserer Instanz |
+| `RECEIPT_MAX_CORRECTION_ROUNDS` | nein | Korrekturrunden vor dem Abbruch, Default 3 |
+| `RETENTION_SPANS` / `_SNAPSHOTS` / `_MESSAGES` | nein | nur für den Prune-Service |
 | `PORT` | nein | setzt Railway selbst; lokal Default 4111 |
 | `MASTRA_HOST` | nein | Default `0.0.0.0` |
-| `DATABASE_URL` | nein | LibSQL-Ziel; Default `file:/app/data/mastra.db` |
-| `DATABASE_AUTH_TOKEN` | nur bei Turso | Token für eine remote libsql-URL |
-| `RECEIPT_DATA_DIR` | nein | Verzeichnis für Uploads/JSONs; Default `/app/data` |
+| `RECEIPT_DATA_DIR` | nein | Verzeichnis für die Belegbilder; Default `/app/data` |
 | `FRONTEND_ORIGIN` | nur Variante B | CORS-Origins, Komma-getrennt |
+| `TEST_DATABASE_URL` | nur für Tests | ohne die Variable wird der Suspend/Resume-Test übersprungen |
 | `MASTRA_TELEMETRY_DISABLED` | nein | `1` schaltet anonyme Telemetrie ab |
 
 Dieselbe Liste steht als Vorlage in `.env.example`.
@@ -248,8 +453,10 @@ Dieselbe Liste steht als Vorlage in `.env.example`.
 ### Vor dem Livegang beachten
 
 - **Studio ist ungeschützt.** `mastra build --studio` liefert sie unter `/` mit
-  aus und sie hat vollen Zugriff auf Agenten und Workflows. Für eine öffentliche
-  Railway-Domain entweder Auth davorlegen oder ohne `--studio` bauen.
+  aus und sie hat vollen Zugriff auf Agenten und Workflows – inklusive der
+  Möglichkeit, einen Workflow mit beliebigem RequestContext zu starten. Damit
+  wäre die Mandantentrennung umgehbar. Für eine öffentliche Railway-Domain
+  entweder Auth davorlegen oder ohne `--studio` bauen.
 - **Der Upload-Endpunkt ist offen** (`POST /receipts/upload`).
-- **Ein Prozess, eine SQLite-Datei.** Für mehrere Replicas `@mastra/pg` oder
-  Turso statt einer lokalen Datei.
+- **Die Belegbilder liegen im Dateisystem**, nicht in Postgres. Ein Redeploy ohne
+  Volume verliert sie.

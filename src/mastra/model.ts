@@ -6,3 +6,4 @@
 export const DEFAULT_MODEL = 'openai/gpt-4o-mini';
 
 export const model = process.env.MASTRA_MODEL || DEFAULT_MODEL;
+

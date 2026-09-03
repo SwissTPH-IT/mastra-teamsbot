@@ -8,20 +8,30 @@
     "build": "mastra build --studio",
     "start": "mastra start",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:deploy": "node scripts/migrate.mjs",
+    "db:prune": "node scripts/prune.mjs",
+    "db:studio": "drizzle-kit studio",
     "teams:manifest": "node teams-app/build.mjs"
   },
   "dependencies": {
     "@chat-adapter/teams": "^4.39.0",
     "@mastra/ai-sdk": "^1.10.0",
     "@mastra/core": "^1.63.2",
-    "@mastra/libsql": "^1.22.2",
     "@mastra/memory": "^1.28.1",
+    "@mastra/pg": "^1.22.3",
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.23.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.10",
     "mastra": "^1.27.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
   },
   "engines": {
     "node": ">=22.0.0"

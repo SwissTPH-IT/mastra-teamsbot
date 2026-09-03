@@ -5,14 +5,20 @@ import { assistantAgent } from './agents/assistant-agent';
 import { receiptExtractionAgent } from './agents/receipt-agent';
 import { receiptChatAgent } from './agents/receipt-chat-agent';
 import { teamsAgent } from './agents/teams-agent';
-import { receiptWorkflow } from './workflows/receipt-workflow';
+import { receiptCorrectionAgent } from './agents/receipt-correction-agent';
+import { receiptExtractionWorkflow } from './workflows/receipt-extraction-workflow';
+import { receiptReviewWorkflow } from './workflows/receipt-review-workflow';
 import { receiptRoutes } from './server/receipt-routes';
+import { healthRoute } from './server/health-route';
 import { MAX_UPLOAD_BYTES } from './receipts/upload-store';
 
 export const mastra = new Mastra({
   agents: {
     assistantAgent,
     receiptExtractionAgent,
+    // Wendet Freitext-Korrekturen auf einen Kandidatensatz an. Wird nur aus dem
+    // Review-Workflow heraus aufgerufen, nicht direkt von einem Nutzer.
+    receiptCorrectionAgent,
     // Der Teams-Bot. Achtung: die Webhook-Route hängt an der `id` des Agents
     // ('teams-agent'), nicht an diesem Key:
     //   POST /api/agents/teams-agent/channels/teams/webhook
@@ -22,7 +28,11 @@ export const mastra = new Mastra({
     receiptChatAgent,
   },
   workflows: {
-    receiptWorkflow,
+    // Die Extraktion allein – vom Web-Pfad (extract-receipt-tool) und aus dem
+    // Studio aufgerufen. Läuft immer durch, suspendiert nie.
+    receiptExtractionWorkflow,
+    // Extraktion + Kontrolle durch den Nutzer + DB-Write. Der Teams-Pfad.
+    receiptReviewWorkflow,
   },
   storage,
   server: {
@@ -52,6 +62,7 @@ export const mastra = new Mastra({
         },
       }),
       ...receiptRoutes,
+      healthRoute,
     ],
     build: {
       swaggerUI: true,

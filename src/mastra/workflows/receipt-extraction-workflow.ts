@@ -1,4 +1,4 @@
-// src/mastra/workflows/receipt-workflow.ts
+// src/mastra/workflows/receipt-extraction-workflow.ts
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { z } from 'zod';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -13,6 +13,16 @@ const MIME_BY_EXT: Record<string, string> = {
   '.gif': 'image/gif',
   '.pdf': 'application/pdf',
 };
+
+// Unchanged extraction: load -> extract -> write JSON.
+//
+// This workflow is the single place receipt extraction happens. Both callers use
+// it: the web chat via `extract-receipt-tool.ts`, and the Teams review workflow
+// (`receipt-review-workflow.ts`), which nests it and appends the human review and
+// the database write.
+//
+// Deliberately has no suspend/resume of its own — the web frontend has no way to
+// answer a suspended run, so this one always runs to completion.
 
 /**
  * Step 1 — Load: read the receipt file from disk and turn it into a data URL.
@@ -115,8 +125,8 @@ const writeReceiptJson = createStep({
   },
 });
 
-export const receiptWorkflow = createWorkflow({
-  id: 'receipt-workflow',
+export const receiptExtractionWorkflow = createWorkflow({
+  id: 'receipt-extraction-workflow',
   inputSchema: z.object({
     receiptPath: z.string().describe('Absolute path to the receipt image.'),
     receiptJsonPath: z.string().describe('Absolute path where the JSON result is written.'),

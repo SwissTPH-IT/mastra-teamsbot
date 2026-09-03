@@ -1,7 +1,7 @@
 // Brücke zwischen Chat und Workflow.
 //
 // Der Chat-Agent bekommt vom Frontend nur uploadIds zu sehen. Dieses Tool löst
-// sie zu Dateipfaden auf und startet damit den bestehenden `receipt-workflow` –
+// sie zu Dateipfaden auf und startet damit den bestehenden `receipt-extraction-workflow` –
 // derselbe Workflow, der auch aus dem Studio läuft. Die Extraktionslogik bleibt
 // also an genau einer Stelle.
 
@@ -38,7 +38,7 @@ export const extractReceiptTool = createTool({
       throw new Error('Tool ohne Mastra-Instanz aufgerufen – Workflow nicht erreichbar.');
     }
 
-    const workflow = mastra.getWorkflowById('receipt-workflow');
+    const workflow = mastra.getWorkflowById('receipt-extraction-workflow');
     const logger = mastra.getLogger();
 
     // Sequenziell: die Extraktion ist ein Modellaufruf pro Bild, und bei einer

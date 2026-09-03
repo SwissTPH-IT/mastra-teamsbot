@@ -15,6 +15,8 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
+COPY drizzle ./drizzle
 
 # Erzeugt .mastra/output – ein eigenständiges Bundle inkl. eigenem
 # package-lock.json und installierten Prod-Abhängigkeiten.
@@ -32,15 +34,25 @@ ENV MASTRA_HOST=0.0.0.0
 
 COPY --from=build /app/.mastra/output ./.mastra/output
 
+# Migrations- und Prune-Job in das Build-Artefakt hinein. Beide sind plain ESM
+# und ziehen ihre Abhängigkeiten (pg, drizzle-orm, @mastra/pg) aus dem
+# node_modules, das `mastra build` in .mastra/output ohnehin installiert – kein
+# zweites node_modules, kein tsx im Laufzeit-Image.
+# Die Pfade sind so gewählt, dass migrate.mjs seinen Migrationsordner über
+# `../drizzle` findet, genau wie im Repo.
+COPY --from=build /app/scripts ./.mastra/output/scripts
+COPY --from=build /app/drizzle ./.mastra/output/drizzle
+
 # Fallback für lokale Läufe. Auf Railway wird PORT von der Plattform gesetzt
 # und überschreibt das hier; src/mastra/index.ts liest process.env.PORT.
 ENV PORT=4111
 EXPOSE 4111
 
-# Mount-Punkt fuer das persistente Railway-Storage: LibSQL-DB, Uploads und
-# Belegs-JSONs. Hier steht absichtlich nur ein mkdir - die Docker-Anweisung
-# dafuer lehnt Railway ab; eingehaengt wird beim Container-Start ueber den
-# Mount Path (/app/data) aus den Service-Settings.
+# Mount-Punkt fuer das persistente Railway-Storage: die hochgeladenen Belege.
+# Threads, Memory, Traces und Workflow-Snapshots liegen in Postgres, nicht mehr
+# hier. Hier steht absichtlich nur ein mkdir - die Docker-Anweisung dafuer lehnt
+# Railway ab; eingehaengt wird beim Container-Start ueber den Mount Path
+# (/app/data) aus den Service-Settings.
 RUN mkdir -p /app/data
 
 CMD ["node", ".mastra/output/index.mjs"]

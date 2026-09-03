@@ -1,15 +1,29 @@
-// Der Weg vom Teams-Anhang in den `receipt-workflow`.
+// Der Weg vom Teams-Anhang in den `receipt-review-workflow` – und der Weg der
+// Antwort des Nutzers zurück in `run.resume()`.
 //
-// Teams liefert Bilder als `message.attachments`. Der Workflow will einen
-// Dateipfad – genau wie beim Aufruf aus dem Studio oder aus dem Web-Frontend.
-// Dieser Handler schließt die Lücke: Anhang holen, über den bestehenden
-// `upload-store` ablegen, Workflow starten, Ergebnis als Text zurückposten.
+// Zwei Fälle:
 //
-// Damit existiert die Extraktionslogik weiterhin an genau einer Stelle
-// (`receipt-workflow`), egal ob der Beleg aus dem Browser oder aus Teams kommt.
+//   Nachricht MIT Bild    -> Beleg ablegen, Review-Run starten, Vorlage posten.
+//                            Der Run bleibt suspendiert im Store liegen.
+//   Nachricht OHNE Bild   -> gibt es für diesen Thread einen offenen Review,
+//                            ist die Nachricht die Antwort darauf. Sonst
+//                            übernimmt der Standard-Handler (Agent + DB-Tools).
+//
+// Die Zuordnung Thread -> runId steht in app.pending_reviews, damit sie einen
+// Prozess-Neustart und ein Railway-Deploy überlebt. Der Kandidatensatz steht
+// dort NICHT – der liegt im Workflow-Snapshot, wo Mastra ihn verwaltet.
 
 import type { ChannelHandler } from '@mastra/core/channels';
-import type { ReceiptData } from '../agents/receipt-agent';
+import { createWorkflowStateReader } from '@mastra/core/workflows';
+import { createHash } from 'node:crypto';
+import { model } from '../model';
+import { USER_ID_KEY } from '../tools/tool-context';
+import { MAX_CORRECTION_ROUNDS, initialReviewState } from '../workflows/receipt-review-workflow';
+import {
+  closePendingReview,
+  getPendingReview,
+  openPendingReview,
+} from '../../db/receipts';
 import {
   ALLOWED_UPLOAD_TYPES,
   MAX_UPLOAD_BYTES,
@@ -17,13 +31,6 @@ import {
   resolveUploadPath,
   storeUpload,
 } from '../receipts/upload-store';
-
-type ReceiptOutcome = {
-  name: string;
-  receipt?: ReceiptData;
-  receiptJsonPath?: string;
-  error?: string;
-};
 
 /**
  * Anhänge, die als Beleg in Frage kommen.
@@ -98,58 +105,109 @@ async function readAttachment(attachment: {
   throw new Error('Anhang enthält keine Daten und keine URL.');
 }
 
-/** Ein Betrag pro Beleg, kurz gehalten – Teams ist ein Chat, kein Report. */
-function summarize(outcomes: ReceiptOutcome[]): string {
-  const lines = outcomes.map(outcome => {
-    if (outcome.error || !outcome.receipt) {
-      return `❌ **${outcome.name}** – nicht verarbeitet: ${outcome.error ?? 'unbekannter Fehler'}`;
-    }
+/**
+ * Der Provider meldet ein nicht bildfähiges Modell mit "No endpoints found that
+ * support image input" – ohne zu sagen, welches Modell er meint. Genau die
+ * Information fehlt beim Debuggen, also hier anhängen.
+ */
+function annotateModelError(reason: string): string {
+  if (!/support image input|does not support image|vision/i.test(reason)) return reason;
+  return `${reason} (konfiguriertes Modell: "${model}" – MASTRA_MODEL muss auf ein vision-fähiges Modell zeigen)`;
+}
 
-    const { merchant, transaction, totals, payment, issues } = outcome.receipt;
-    const date = transaction.dateNormalized !== 'NOT_PRESENT' ? transaction.dateNormalized : transaction.dateRaw;
-    const amount = [payment.currency, totals.total].filter(v => v && v !== 'NOT_PRESENT').join(' ');
+type ReviewResume =
+  | { kind: 'confirm' }
+  | { kind: 'correct'; text: string }
+  | { kind: 'cancel' };
 
-    let line = `✅ **${merchant.name}** · ${date} · ${amount || 'Betrag nicht lesbar'}`;
-    if (issues.length > 0) {
-      line += `\n   ⚠️ ${issues.join('; ')} – bitte ein neues Foto (gerade, vollständig im Bild, mehr Licht).`;
-    }
-    return line;
-  });
+/**
+ * Antwort des Nutzers auf eine Vorlage einordnen.
+ *
+ * Bewusst deterministisch und nicht per Modell: ob eine Buchung geschrieben wird,
+ * soll nicht davon abhängen, wie ein LLM gerade gelaunt ist. Nur eine klare
+ * Zustimmung zählt als Zustimmung – alles andere ist eine Korrektur und führt zu
+ * einer erneuten Vorlage, also im schlimmsten Fall zu einer Rückfrage zu viel
+ * statt zu einer falschen Buchung.
+ */
+const CONFIRM_WORDS = [
+  'ja', 'passt', 'stimmt', 'korrekt', 'richtig', 'ok', 'okay', 'bestätigt', 'bestaetigt',
+  'speichern', 'übernehmen', 'uebernehmen', 'yes', 'jup', 'jo', 'genau', 'perfekt', '👍', '✅',
+];
+const CANCEL_WORDS = [
+  'abbrechen', 'abbruch', 'verwerfen', 'löschen', 'loeschen', 'nicht speichern', 'cancel', 'stop',
+];
 
-  const ok = outcomes.filter(o => o.receipt).length;
-  const header =
-    outcomes.length === 1
-      ? ''
-      : `**${ok} von ${outcomes.length} Belegen verarbeitet.**\n\n`;
+export function classifyReply(text: string): ReviewResume {
+  const normalized = text.trim().toLowerCase();
 
-  return header + lines.join('\n');
+  if (normalized === '') return { kind: 'correct', text };
+
+  if (CANCEL_WORDS.some(word => normalized === word || normalized.startsWith(`${word} `))) {
+    return { kind: 'cancel' };
+  }
+
+  // Nur kurze, eindeutige Zustimmung. "ja, aber das Datum stimmt nicht" ist
+  // eine Korrektur, kein Ja – deshalb die Längenbegrenzung.
+  const stripped = normalized.replace(/[.!,\s]+$/g, '');
+  if (CONFIRM_WORDS.includes(stripped)) return { kind: 'confirm' };
+  if (
+    normalized.length <= 25 &&
+    CONFIRM_WORDS.some(word => stripped.startsWith(word)) &&
+    !/nicht|kein|falsch|aber|ausser|außer/.test(normalized)
+  ) {
+    return { kind: 'confirm' };
+  }
+
+  return { kind: 'correct', text };
+}
+
+/** Die Vorlage, wie sie im Thread erscheint. */
+function presentation(payload: {
+  summary: string;
+  round: number;
+  isRecheck: boolean;
+}): string {
+  const header = payload.isRecheck
+    ? `**Korrigiert – bitte nochmal prüfen** (Runde ${payload.round} von ${MAX_CORRECTION_ROUNDS})`
+    : '**Beleg gelesen – bitte prüfen**';
+
+  return (
+    `${header}\n\n${payload.summary}\n\n` +
+    'Antworte mit **"passt"** zum Speichern, mit einer Korrektur ' +
+    '(z. B. „das Datum ist der 3., nicht der 8."), oder mit **"abbrechen"**.'
+  );
+}
+
+type SuspendPayload = { summary: string; round: number; isRecheck: boolean };
+
+/**
+ * Ergebnis eines start()/resume() in eine Thread-Nachricht übersetzen und den
+ * pending_review entsprechend offen halten oder schliessen.
+ */
+async function reportOutcome(
+  thread: { id: string; post: (message: string) => Promise<unknown> },
+  result: { status: string; suspendPayload?: unknown; result?: { message?: string; status?: string } },
+): Promise<void> {
+  if (result.status === 'suspended') {
+    await thread.post(presentation(result.suspendPayload as SuspendPayload));
+    return;
+  }
+
+  await closePendingReview(thread.id);
+
+  if (result.status === 'success') {
+    const outcome = result.result;
+    await thread.post(outcome?.status === 'saved' ? `✅ ${outcome.message}` : `ℹ️ ${outcome?.message}`);
+    return;
+  }
+
+  await thread.post(`❌ Der Beleg konnte nicht verarbeitet werden (Status "${result.status}").`);
 }
 
 /**
  * Handler für Mentions, DMs und Folgenachrichten im Thread.
- *
- * Ohne Bildanhang übernimmt der Standard-Handler – der Agent antwortet dann
- * ganz normal per Modell. Mit Bildanhang läuft der deterministische Pfad:
- * jedes Bild einmal durch den `receipt-workflow`.
  */
 export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaultHandler, ctx) => {
-  const images = message.attachments.filter(isReceiptImage);
-
-  // Ohne das ist ein aussortierter Anhang von "gar kein Anhang" nicht zu
-  // unterscheiden – und der Nutzer sieht nur, dass der Agent antwortet.
-  if (message.attachments.length > 0) {
-    ctx.mastra?.getLogger()?.debug(
-      `[teams] ${images.length}/${message.attachments.length} Anhänge als Beleg erkannt: ${message.attachments
-        .map(a => `${a.name ?? 'ohne Namen'} (type=${a.type}, mime=${a.mimeType ?? 'unbekannt'})`)
-        .join(', ')}`,
-    );
-  }
-
-  if (images.length === 0) {
-    await defaultHandler(thread, message);
-    return;
-  }
-
   const mastra = ctx.mastra;
   if (!mastra) {
     await thread.post(
@@ -158,72 +216,165 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
     return;
   }
 
+  // Die Mandantenkennung, serverseitig aus dem signierten Bot-Framework-Payload.
+  // Der ChannelHandlerContext trägt den RequestContext genau dafür: laut
+  // @mastra/core/dist/channels/types.d.ts darf ein Handler hier "stamp the
+  // tenant a channel sender maps to", bevor er defaultHandler aufruft.
+  // Ab hier sehen Workflow-Steps und Agent-Tools dieselbe userId.
+  const userId = message.author.userId;
+  ctx.requestContext.set(USER_ID_KEY, userId);
+
   const logger = mastra.getLogger();
-  const workflow = mastra.getWorkflowById('receipt-workflow');
+  const workflow = mastra.getWorkflowById('receipt-review-workflow');
+  const images = message.attachments.filter(isReceiptImage);
+
+  // Ohne das ist ein aussortierter Anhang von "gar kein Anhang" nicht zu
+  // unterscheiden – und der Nutzer sieht nur, dass der Agent antwortet.
+  if (message.attachments.length > 0) {
+    logger?.debug(
+      `[teams] ${images.length}/${message.attachments.length} Anhänge als Beleg erkannt: ${message.attachments
+        .map(a => `${a.name ?? 'ohne Namen'} (type=${a.type}, mime=${a.mimeType ?? 'unbekannt'})`)
+        .join(', ')}`,
+    );
+  }
+
+  /* ---------- Fall 1: Antwort auf eine offene Vorlage ---------- */
+
+  if (images.length === 0) {
+    const pending = await getPendingReview(thread.id);
+    if (!pending) {
+      // Ganz normale Nachricht: der Agent antwortet, mit den DB-Tools.
+      await defaultHandler(thread, message);
+      return;
+    }
+
+    // Ein offener Review gehört dem Nutzer, der ihn gestartet hat. In einem
+    // Kanal darf nicht jemand anderes die Buchung eines Kollegen bestätigen.
+    if (pending.userId !== userId) {
+      await defaultHandler(thread, message);
+      return;
+    }
+
+    const resumeData = classifyReply(message.text);
+
+    try {
+      // Der in der Doku beschriebene Weg, einen Run aus dem Store fortzusetzen:
+      // Zustand lesen, suspendierten Schritt bestimmen, Run über dieselbe runId
+      // neu aufbauen, resumen. Funktioniert genau deshalb auch nach einem
+      // Prozess-Neustart – der Zustand liegt im Snapshot, nicht im Speicher.
+      // https://mastra.ai/docs/workflows/suspend-and-resume
+      const state = await workflow.getWorkflowRunById(pending.runId);
+      if (!state || state.status !== 'suspended') {
+        await closePendingReview(thread.id);
+        await thread.post(
+          'Zu diesem Thread ist kein offener Beleg mehr vorhanden. Schick den Beleg bitte noch einmal.',
+        );
+        return;
+      }
+
+      const suspendedStep = createWorkflowStateReader(state).getSuspendedStep();
+      const run = await workflow.createRun({ runId: pending.runId });
+
+      await thread.startTyping('Einen Moment…');
+      const result = await run.resume({
+        step: suspendedStep?.path,
+        resumeData,
+        requestContext: ctx.requestContext,
+      });
+
+      await reportOutcome(thread, result);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger?.error(`[teams] Resume für Run ${pending.runId} fehlgeschlagen: ${errorMessage}`);
+      await thread.post(`❌ Die Antwort konnte nicht verarbeitet werden: ${errorMessage}`);
+    }
+    return;
+  }
+
+  /* ---------- Fall 2: neuer Beleg ---------- */
+
+  // Mehrere Bilder in einer Nachricht: nur das erste geht in den Review. Zwei
+  // gleichzeitig offene Vorlagen im selben Thread wären für den Nutzer nicht
+  // auseinanderzuhalten – er antwortet mit einem Satz, und beide Runs würden
+  // ihn beanspruchen.
+  if (images.length > 1) {
+    await thread.post(
+      `Ich habe ${images.length} Bilder bekommen und nehme das erste. Die übrigen bitte einzeln ` +
+        'schicken – jeder Beleg wird einzeln bestätigt.',
+    );
+  }
+
+  const attachment = images[0];
+  const name = attachment.name || 'Beleg';
 
   await thread.startTyping('Beleg wird gelesen…');
 
-  const outcomes: ReceiptOutcome[] = [];
-
-  // Sequenziell: ein Modellaufruf pro Bild, und bei einer Handvoll Belegen ist
-  // die Reihenfolge wertvoller als Parallelität (gleiche Begründung wie im Tool).
-  for (const attachment of images) {
-    const name = attachment.name || 'Beleg';
-    try {
-      const bytes = await readAttachment(attachment);
-      if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-        throw new Error(
-          `Datei ist ${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB groß, erlaubt sind maximal ${
-            MAX_UPLOAD_BYTES / 1024 / 1024
-          } MB.`,
-        );
-      }
-
-      // Teams meldet für eingefügte Bilder nur "image/*", deshalb das Format an
-      // den Bytes bestimmen statt dem gemeldeten mimeType zu vertrauen.
-      const mimeType = detectImageMime(bytes);
-      if (!mimeType) {
-        throw new Error(
-          `Dateiformat nicht erkannt (Teams meldete "${attachment.mimeType ?? 'unbekannt'}"). Erlaubt: ${Object.keys(
-            ALLOWED_UPLOAD_TYPES,
-          ).join(', ')}`,
-        );
-      }
-
-      // storeUpload() validiert Typ und Größe und vergibt die uploadId – exakt
-      // derselbe Pfad wie beim Upload aus dem Web-Frontend.
-      const stored = await storeUpload(new File([bytes as BlobPart], name, { type: mimeType }));
-
-      const run = await workflow.createRun();
-      const result = await run.start({
-        inputData: {
-          receiptPath: resolveUploadPath(stored.uploadId),
-          receiptJsonPath: resolveReceiptJsonPath(stored.uploadId),
-        },
-      });
-
-      if (result.status !== 'success') {
-        const reason =
-          result.status === 'failed'
-            ? result.error?.message || String(result.error)
-            : `Workflow endete mit Status "${result.status}".`;
-        outcomes.push({ name, error: reason });
-        continue;
-      }
-
-      outcomes.push({
-        name,
-        receipt: result.result.receipt,
-        receiptJsonPath: result.result.receiptJsonPath,
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger?.error(`[teams] Beleg "${name}" konnte nicht verarbeitet werden: ${errorMessage}`);
-      outcomes.push({ name, error: errorMessage });
+  try {
+    const bytes = await readAttachment(attachment);
+    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
+      throw new Error(
+        `Datei ist ${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB groß, erlaubt sind maximal ${
+          MAX_UPLOAD_BYTES / 1024 / 1024
+        } MB.`,
+      );
     }
-  }
 
-  // Auch im Fehlerfall bekommt der Nutzer eine Antwort – ein stiller Fehler in
-  // Teams sieht für ihn aus wie ein hängender Bot.
-  await thread.post(summarize(outcomes));
+    // Teams meldet für eingefügte Bilder nur "image/*", deshalb das Format an
+    // den Bytes bestimmen statt dem gemeldeten mimeType zu vertrauen.
+    const mimeType = detectImageMime(bytes);
+    if (!mimeType) {
+      throw new Error(
+        `Dateiformat nicht erkannt (Teams meldete "${attachment.mimeType ?? 'unbekannt'}"). Erlaubt: ${Object.keys(
+          ALLOWED_UPLOAD_TYPES,
+        ).join(', ')}`,
+      );
+    }
+
+    // Der Idempotenz-Key: derselbe Beleg zweimal geschickt gibt denselben Hash
+    // und damit per Upsert dieselbe Zeile.
+    const fileHash = createHash('sha256').update(bytes).digest('hex');
+
+    // storeUpload() validiert Typ und Größe und vergibt die uploadId – exakt
+    // derselbe Pfad wie beim Upload aus dem Web-Frontend.
+    const stored = await storeUpload(new File([bytes as BlobPart], name, { type: mimeType }));
+
+    const run = await workflow.createRun();
+
+    // Zeiger VOR dem Start setzen: startet der Run und der Prozess stirbt, bevor
+    // wir die runId notiert hätten, wäre der suspendierte Run nicht mehr
+    // auffindbar.
+    await openPendingReview({
+      threadId: thread.id,
+      runId: run.runId,
+      userId,
+      uploadId: stored.uploadId,
+    });
+
+    const result = await run.start({
+      inputData: {
+        receiptPath: resolveUploadPath(stored.uploadId),
+        receiptJsonPath: resolveReceiptJsonPath(stored.uploadId),
+        fileHash,
+        fileReference: `local:uploads/${stored.uploadId}`,
+      },
+      initialState: initialReviewState,
+      requestContext: ctx.requestContext,
+    });
+
+    if (result.status === 'failed') {
+      await closePendingReview(thread.id);
+      const reason = result.error?.message || String(result.error);
+      await thread.post(`❌ **${name}** – nicht verarbeitet: ${annotateModelError(reason)}`);
+      return;
+    }
+
+    await reportOutcome(thread, result);
+  } catch (error) {
+    await closePendingReview(thread.id);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger?.error(`[teams] Beleg "${name}" konnte nicht verarbeitet werden: ${errorMessage}`);
+    // Auch im Fehlerfall bekommt der Nutzer eine Antwort – ein stiller Fehler in
+    // Teams sieht für ihn aus wie ein hängender Bot.
+    await thread.post(`❌ **${name}** – nicht verarbeitet: ${annotateModelError(errorMessage)}`);
+  }
 };
