@@ -5,7 +5,6 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 180,
     "restartPolicyType": "ON_FAILURE",

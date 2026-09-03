@@ -180,16 +180,61 @@ function presentation(payload: {
 
 type SuspendPayload = { summary: string; round: number; isRecheck: boolean };
 
+/** Der Step im receipt-review-workflow, der suspendiert. */
+const REVIEW_STEP_ID = 'review-candidate';
+
+/**
+ * Die Suspend-Payload des Review-Schritts aus dem Run-Ergebnis lösen.
+ *
+ * `result.suspendPayload` ist NICHT die Payload selbst, sondern eine Map
+ * stepId -> Payload (Execution Engine: `base.suspendPayload[stepId] = rest`).
+ * Der direkte Zugriff auf `.summary` ergab deshalb undefined – und genau das
+ * stand dann anstelle der Vorlage im Thread.
+ */
+function readSuspendPayload(result: {
+  suspendPayload?: unknown;
+  steps?: Record<string, unknown>;
+}): SuspendPayload | undefined {
+  const candidates = [
+    (result.suspendPayload as Record<string, unknown> | undefined)?.[REVIEW_STEP_ID],
+    // Dieselbe Payload hängt auch am Step-Ergebnis – als Absicherung, falls die
+    // Engine die Map-Form einmal anders aufbaut.
+    (result.steps?.[REVIEW_STEP_ID] as { suspendPayload?: unknown } | undefined)?.suspendPayload,
+  ];
+
+  for (const entry of candidates) {
+    const payload = entry as SuspendPayload | undefined;
+    if (payload && typeof payload.summary === 'string' && payload.summary.length > 0) return payload;
+  }
+  return undefined;
+}
+
 /**
  * Ergebnis eines start()/resume() in eine Thread-Nachricht übersetzen und den
  * pending_review entsprechend offen halten oder schliessen.
  */
 async function reportOutcome(
   thread: { id: string; post: (message: string) => Promise<unknown> },
-  result: { status: string; suspendPayload?: unknown; result?: { message?: string; status?: string } },
+  result: {
+    status: string;
+    suspendPayload?: unknown;
+    steps?: Record<string, unknown>;
+    result?: { message?: string; status?: string };
+  },
 ): Promise<void> {
   if (result.status === 'suspended') {
-    await thread.post(presentation(result.suspendPayload as SuspendPayload));
+    const payload = readSuspendPayload(result);
+    // Ohne Vorlage darf der Review nicht offen bleiben: ein "passt" würde sonst
+    // einen Datensatz bestätigen, den der Nutzer nie gesehen hat.
+    if (!payload) {
+      await closePendingReview(thread.id);
+      await thread.post(
+        '❌ Der Beleg wurde gelesen, aber die Vorlage zum Prüfen konnte nicht aufgebaut werden. ' +
+          'Bitte den Beleg noch einmal schicken.',
+      );
+      return;
+    }
+    await thread.post(presentation(payload));
     return;
   }
 

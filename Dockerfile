@@ -43,6 +43,11 @@ COPY --from=build /app/.mastra/output ./.mastra/output
 COPY --from=build /app/scripts ./.mastra/output/scripts
 COPY --from=build /app/drizzle ./.mastra/output/drizzle
 
+# Der Rollen-Umschalter. Liegt ausserhalb von .mastra/output, damit klar ist,
+# dass er nicht zum Build-Artefakt gehoert.
+COPY --from=build /app/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Fallback für lokale Läufe. Auf Railway wird PORT von der Plattform gesetzt
 # und überschreibt das hier; src/mastra/index.ts liest process.env.PORT.
 ENV PORT=4111
@@ -55,19 +60,11 @@ EXPOSE 4111
 # (/app/data) aus den Service-Settings.
 RUN mkdir -p /app/data
 
-# Migration UND Start, verkettet mit &&: der Server startet nur, wenn die
-# Migration mit Exit-Code 0 durchgelaufen ist.
+# Was der Container tut, entscheidet RUN_MODE - siehe scripts/docker-entrypoint.sh.
+# Default (Variable nicht gesetzt): migrieren, dann den Agenten starten.
 #
-# Das steht bewusst hier im Image und nicht nur in railway.json. Auf Railway
-# wurde erst ein preDeployCommand und danach ein startCommand aus der
-# railway.json stillschweigend nicht ausgefuehrt - der Agent startete gegen
-# eine leere Datenbank und crashte in einer Endlosschleife mit
-# 42P01 "relation mastra.mastra_schedules does not exist".
-#
-# Im Dockerfile-CMD greift es auch dann, wenn die Plattform-Config nicht
-# angewendet wird: das ist der Standardbefehl des Images. railway.json setzt
-# denselben Befehl noch einmal, das ist dieselbe Zeile, kein Widerspruch.
-#
-# Beide Teile sind idempotent (Drizzle fuehrt nur neue Migrationen aus,
-# storage.init() legt nur fehlende Tabellen an), der Lauf kostet ~1 Sekunde.
-CMD ["sh", "-c", "node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs"]
+# Das steht bewusst im Image und nicht nur in railway.json: auf Railway wurden
+# dort erst ein preDeployCommand und dann ein startCommand stillschweigend nicht
+# angewandt, der Agent startete gegen eine leere Datenbank und crashte endlos
+# mit 42P01 "relation mastra.mastra_schedules does not exist".
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
