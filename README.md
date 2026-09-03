@@ -403,60 +403,301 @@ ist damit Pflicht. Für eine Multi-Tenant-App beides gemeinsam umstellen.
 
 ## Deployment auf Railway
 
-Vier Services pro Environment – drei davon aus **demselben** Repo, unterschieden
-nur durch ihre Config-Datei:
+Vier Ressourcen pro Environment, drei Services davon aus **demselben** Repo –
+unterschieden nur durch ihren `dockerfilePath` und eine Umgebungsvariable:
 
 ```
 Railway-Projekt
 ├── Environment "staging"
 │   ├── Postgres          Datenbank-Service, Backups an
-│   ├── mastra-agent      Repo → railway.json            (Default)
-│   ├── mastra-prune      Repo → railway.prune.json      (Settings → Config File)
-│   └── receipt-frontend  Repo → railway.frontend.json   (Settings → Config File)
+│   ├── mastra-agent      Dockerfile           · RUN_MODE ungesetzt → Server
+│   ├── mastra-prune      Dockerfile           · RUN_MODE=prune, Cron
+│   └── receipt-frontend  frontend/Dockerfile
 └── Environment "production"
     └── … dieselben vier, eigene Datenbank
 ```
 
 | | `mastra-agent` | `mastra-prune` | `receipt-frontend` |
 |---|---|---|---|
-| Config-Datei | `railway.json` (Default) | `/railway.prune.json` (explizit setzen!) | `/railway.frontend.json` (explizit setzen!) |
 | Dockerfile | `Dockerfile` | `Dockerfile` | `frontend/Dockerfile` |
-| Start | Server | `scripts/prune.mjs`, terminiert | Next-Server |
-| Migrationen | ja, im `CMD` | – | **nein** |
+| Rolle | `RUN_MODE` ungesetzt | `RUN_MODE=prune` | – |
+| Start | migrieren, dann Server | `scripts/prune.mjs`, terminiert | Next-Server |
+| Migrationen | ja, im `ENTRYPOINT` | – | **nein** |
 | Health-Check | `/healthz` | – | `/api/healthz` |
 | Cron | – | `0 3 * * *` | – |
 | Volume | `/app/data` | – | – |
-| `DATABASE_URL` | `${{ Postgres.DATABASE_URL }}` | dieselbe Referenz | dieselbe Referenz |
+| `DATABASE_URL` | Referenz auf `Postgres` | dieselbe Referenz | dieselbe Referenz |
 
-Die explizite Config-Datei ist bei den letzten beiden **nicht optional**: Railway
-liest per Default die `railway.json` im Repo-Root, und Config-as-Code überschreibt
-Dashboard-Einstellungen. Ohne eigene Datei würde das Frontend den Start-Befehl und
-den Health-Check-Pfad des Agenten erben. Mehr dazu unter „3. Prune-Service".
+Definiert ist das alles in **einer** Datei: `.railway/railway.ts`. Die frühere
+`railway.json`-Variante ist für neue Services nicht mehr verfügbar – warum, steht
+unter „Warum Infrastructure as Code".
 
-### 1. Postgres anlegen
+Der nächste Abschnitt ist die Anleitung von null auf; danach folgen die Details
+nach Thema.
 
-**New → Database → PostgreSQL.** Danach in den Variablen des Agent-Service:
+### Von null auf: die Reihenfolge
 
+Der Ablauf einmal linear. Das *Warum* zu jedem Schritt steht in den Abschnitten
+danach – hier steht nur, was in welcher Reihenfolge zu tun ist. Für ein zweites
+Environment (production) ist es derselbe Ablauf ab Schritt 3.
+
+**0. Lokal grün machen.** Nichts deployen, was lokal nicht läuft.
+
+```bash
+npm install                                   # Repo-Root, Workspace-Install
+npm run typecheck && npm run build            # Agent + .railway/railway.ts
+cd frontend && npm run typecheck && npm run build && npm run lint && cd ..
+cp .env.example .env                          # Key eintragen
+docker compose up --build                     # alle drei Services
+curl localhost:4111/healthz                   # {"status":"ok","database":"up"}
+curl localhost:3000/api/healthz               # dasselbe für die Oberfläche
 ```
-DATABASE_URL = ${{ Postgres.DATABASE_URL }}
-```
 
-Als **Referenz-Variable**, nicht als kopierter Connection String: Railway
-rotiert das Passwort beim Neuaufbau des Datenbank-Service, ein kopierter String
-wird dann still ungültig.
+**1. Azure Bot Registration.** Liefert die drei `TEAMS_APP_*`, die der Agent
+braucht. Der Messaging-Endpoint kommt erst in Schritt 5 – die Railway-Domain
+existiert jetzt noch nicht. Notiere Application (client) ID, ein Client Secret
+und die Tenant-ID. `appType` ist **SingleTenant**, deshalb ist
+`TEAMS_APP_TENANT_ID` Pflicht.
 
-Unter **Postgres → Settings → Backups** die Backups aktivieren. Ohne das ist eine
+**2. Railway-Projekt anlegen** und darin das Environment `staging`.
+Noch keine Services von Hand – die kommen aus der IaC-Definition.
+
+**3. Postgres anlegen.** *New → Database → PostgreSQL*, danach unter
+*Postgres → Settings → Backups* die Backups einschalten. Ohne die ist eine
 versehentliche Migration nicht rückholbar.
 
-### 2. Agent-Service
+Der Service muss vor dem `apply` existieren und **`Postgres`** heissen – so
+heisst er in `.railway/railway.ts`. Ein anderer Name dort ist für Railway eine
+andere Ressource.
 
-Baut über das `Dockerfile` (siehe `railway.json`). Wichtig sind drei Einträge
-dort:
+**4. Infrastructure as Code anwenden.**
+
+Die IaC-Engine steckt in der **CLI**, nicht im npm-Paket, und verlangt
+**Railway CLI ≥ 5.42.1**. Eine ältere CLI hat gar kein `config`-Subcommand –
+sichtbar daran, dass `railway --help` es nicht listet. Deshalb zuerst:
+
+```bash
+railway --version                 # muss >= 5.42.1 sein
+railway upgrade                   # sonst: hat kein `config`
+```
+
+```bash
+railway login
+railway link                      # Projekt UND Environment (staging) wählen
+railway config pull --force       # Ist-Zustand importieren
+railway config plan               # LESEN. "x to add, y to change, z to destroy"
+railway config apply
+```
+
+Die Befehle laufen im **Repo-Root**: die CLI sucht `.railway/railway.ts` im
+aktuellen Verzeichnis und darüber. Das npm-Paket `railway` in den
+devDependencies liefert nur die **Typen** zum Schreiben der Datei (damit
+`npm run typecheck` sie prüft) – ausgeführt wird sie von der CLI.
+
+**`apply` deployt keinen Code.** Es legt Services an und setzt deren
+Konfiguration; der Code kommt aus GitHub, weil jeder Service
+`source: github(REPO, { branch: 'main' })` hat. Gebaut wird also durch einen
+**Push auf `main`**, nicht durch `apply`. Beides muss passiert sein, damit ein
+Service läuft – siehe „Was git damit zu tun hat".
+
+Der `plan`-Output ist der Punkt, an dem Fehler noch kostenlos sind. Steht dort
+ein `destroy` für etwas, das bleiben soll, stimmt ein Name nicht – korrigieren
+und erneut `plan`. Nichts blind applyen.
+
+Danach existieren `mastra-agent`, `receipt-frontend`, `mastra-prune` und das
+Volume `receipt-uploads` auf `/app/data`.
+
+**5. Secrets setzen.** Sie stehen in der IaC-Definition als `preserve()` und
+damit **nicht** im Repo – auf einem frischen Environment ist da also noch nichts
+zu erhalten. Im Dashboard am Service `mastra-agent`:
+
+```
+MASTRA_MODEL        openrouter/anthropic/claude-sonnet-4.5   (muss vision-fähig sein!)
+OPENROUTER_API_KEY  <key>
+TEAMS_APP_ID        <aus Schritt 1>
+TEAMS_APP_PASSWORD  <aus Schritt 1>
+TEAMS_APP_TENANT_ID <aus Schritt 1>
+```
+
+`DATABASE_URL`, `MASTRA_HOST` und `MASTRA_URL` **nicht** von Hand setzen – die
+kommen aus der IaC-Definition.
+
+**6. Domains generieren.** *Settings → Networking → Generate Domain*, an zwei
+Services:
+
+- `mastra-agent` – zwingend, das Bot Framework ruft den Webhook von aussen auf.
+- `receipt-frontend` – damit das Finanzteam die Tabelle erreicht. Die Oberfläche
+  ist unauthentifiziert; wer die URL hat, sieht die Belege aller Nutzer (siehe
+  „Frontend-Service").
+
+IaC lässt `networking` bewusst unangetastet, deshalb ist das ein Klick im
+Dashboard und keine Zeile in der Definition.
+
+**7. Ersten Deploy abwarten und prüfen.** Der Agent migriert beim Start
+(`ENTRYPOINT`, `RUN_MODE` ungesetzt) und legt dabei beide Schemas an – `mastra`
+und `app`. Danach:
+
+```bash
+curl https://<mastra-agent>.up.railway.app/healthz     # {"status":"ok","database":"up"}
+curl https://<receipt-frontend>.up.railway.app/api/healthz
+```
+
+Der Prune-Job läuft erst nachts; er braucht die Tabellen, die Schritt 7 anlegt.
+Deshalb steht er in dieser Reihenfolge hinten.
+
+**8. Messaging-Endpoint in Azure nachtragen** – jetzt ist die Domain bekannt:
+
+```
+https://<mastra-agent>.up.railway.app/api/agents/teams-agent/channels/teams/webhook
+```
+
+Der Pfadteil `teams-agent` ist die `id` des Agents, **nicht** der Registry-Key
+`teamsAgent`. Ändert sich die `id`, ändert sich dieser Endpoint.
+
+**9. Teams-App-Paket bauen und hochladen.**
+
+```bash
+TEAMS_APP_ID=<guid> npm run teams:manifest   # -> teams-app/dist/teams-app.zip
+```
+
+Das ZIP in Teams hochladen (*Apps → Manage your apps → Upload an app*).
+
+**10. Abnahme über den echten Weg.** Erst wenn das durchläuft, ist der Deploy
+gut:
+
+1. In Teams ein Belegfoto an den Bot senden.
+2. Der Bot legt die gelesenen Werte vor.
+3. „passt" antworten.
+4. Im Frontend unter `/belege` erscheint die Zeile – mit dem Belegdatum, dem
+   Betrag in `de-CH` und dem Erfassungszeitpunkt in `Europe/Zurich`.
+5. Detailseite öffnen: das Belegbild wird über den Proxy geladen (beweist, dass
+   Private Networking und das Volume stehen).
+6. CSV exportieren und in Excel öffnen: Umlaute intakt, Spalten getrennt.
+
+**11. Config as Code entfernen.** Jetzt, nach dem erfolgreichen `apply` – nicht
+vorher:
+
+```bash
+git rm railway.json railway.prune.json
+git commit -m "chore: config as code durch .railway/railway.ts ersetzt"
+```
+
+**12. Production.** Zweites Environment, eigener Postgres-Service, derselbe
+Ablauf ab Schritt 3. Erst nach grüner Abnahme auf staging promoten. Details
+unter „Staging und Produktion".
+
+## Deployment-Details
+
+Ab hier das *Warum* zu den Schritten oben, nach Thema statt nach Reihenfolge.
+
+### Warum Infrastructure as Code und nicht `railway.json`
+
+Railway hat **Config as Code deprecated**:
+
+> Existing `railway.json` / `railway.toml` files continue to work for services
+> that already use them until **2026-12-01** (hard cutoff). New services cannot
+> opt into Config as Code.
+
+Und der Teil, der hier den Ausschlag gibt: seit **2026-08-28** kann ein Service,
+der Config as Code noch nie benutzt hat, es **nicht mehr aktivieren**. Der
+Frontend-Service ist neu – ein `railway.frontend.json` samt Eintrag unter
+Settings → Config File wäre wirkungslos. Dieser Weg existiert für ihn nicht.
+
+Ersatz ist **Infrastructure as Code**: eine `.railway/railway.ts`, die nicht beim
+Deploy gelesen, sondern über die CLI angewandt wird.
+
+```bash
+railway upgrade                  # IaC braucht CLI >= 5.42.1
+railway login
+railway link                     # Projekt UND Environment wählen
+railway config pull --force      # beim ersten Mal: Ist-Zustand importieren
+railway config plan              # Diff ansehen – immer erst das
+railway config apply             # ... dann anwenden
+```
+
+`railway link` wählt das Environment, `apply` schreibt genau dorthin – die Datei
+ist für staging und production dieselbe und wird zweimal angewandt.
+
+**Beim ersten Mal `pull` vor `plan`.** Die Servicenamen in `.railway/railway.ts`
+müssen mit den real existierenden übereinstimmen; ein abweichender Name ist für
+Railway ein anderer Service, und der Plan würde einen neuen anlegen und den alten
+zum Löschen vorschlagen. Genau dafür gibt es `plan`: er sagt „1 to add, 0 to
+change, 0 to destroy", bevor irgendetwas passiert. Nichts blind applyen.
+
+Nebenbei wird die Konfiguration dadurch **kürzer**: der ganze Kunstgriff mit
+einer zweiten und dritten Config-Datei entfällt, weil `dockerfilePath` eine
+normale Service-Option ist. Und `DATABASE_URL` ist eine echte Referenz
+(`db.env.DATABASE_URL`) statt eines Strings, den man richtig tippen muss.
+
+Zwei Dinge, die in der Datei begründet sind und leicht falsch gemacht werden:
+
+- **Secrets stehen nicht im Repo.** `OPENROUTER_API_KEY` und die drei
+  `TEAMS_APP_*` sind mit `preserve()` markiert: IaC lässt den im Dashboard
+  gesetzten Wert unangetastet und zeigt ihn auch im `plan`-Output nicht.
+- **`MASTRA_URL` ist ein Literal mit Railways `${{…}}`-Syntax**, kein
+  Referenzobjekt. Hier wird ein Wert zusammengesetzt (Schema + Private Domain +
+  Port), und `agent.env.RAILWAY_PRIVATE_DOMAIN` liesse sich nicht in einen String
+  interpolieren – das ergäbe `[object Object]`. Railway löst `${{…}}` zur
+  Deploy-Zeit auf, wie bei einem im Dashboard getippten Wert.
+
+**Reihenfolge der Umstellung:** `railway.json` und `railway.prune.json` liegen
+noch im Repo und steuern Agent und Prune-Job weiterhin. Sie werden erst gelöscht,
+**nachdem** `railway config apply` einmal durchgelaufen ist – vorher zu löschen
+würde beiden Services beim nächsten Deploy ihren Health-Check und ihre
+Restart-Policy nehmen. Zwei Quellen der Wahrheit dauerhaft nebeneinander sind
+allerdings keine Option; direkt nach dem erfolgreichen `apply` gehören sie weg.
+`railway config migrate --apply` erzeugt die `.railway/railway.ts`
+alternativ aus den beiden bestehenden Dateien – die hier eingecheckte deckt
+zusätzlich den Frontend-Service, die Variablen und das Volume ab, was Config as
+Code nie konnte.
+
+### Was git damit zu tun hat
+
+Zwei getrennte Kanäle, und Verwirrung darüber ist die häufigste Ursache für „ich
+habe deployt, es ändert sich nichts":
+
+| | Was fliesst | Wodurch ausgelöst | Woher gelesen |
+|---|---|---|---|
+| **Konfiguration** | Services, `dockerfilePath`, Health-Check, Variablen, Volume | `railway config apply` von deiner Maschine | `.railway/railway.ts` **lokal** |
+| **Code** | das Repo, das gebaut wird | `git push` auf `main` | GitHub |
+
+Daraus folgt dreierlei:
+
+- **`.railway/railway.ts` muss für `apply` nicht gepusht sein.** Die CLI liest die
+  Datei aus dem Arbeitsverzeichnis. Gepusht gehört sie trotzdem – sonst ist die
+  Infrastruktur nicht versioniert und der nächste `plan` auf einer anderen
+  Maschine sieht etwas anderes.
+- **Der Code muss gepusht sein, sonst baut Railway den alten Stand.** Ein
+  `apply` mit brandneuem `dockerfilePath` auf einen Commit, der dieses Dockerfile
+  nicht enthält, scheitert im Build.
+- **Ein Push auf `main` baut alle drei Services neu**, weil alle denselben Branch
+  beobachten. Das ist korrekt, aber unnötig: mit `watchPatterns` im `build`-Block
+  liesse sich das einschränken (`frontend/**` für die Oberfläche, `src/**` für den
+  Agenten). Bewusst noch nicht gesetzt – erst wenn die Pfadlisten stimmen, sonst
+  bleibt ein Service still auf einem alten Stand stehen.
+
+### Postgres
+
+`DATABASE_URL` wird an keinem Service von Hand gesetzt. In
+`.railway/railway.ts` steht `db.env.DATABASE_URL` – eine echte **Referenz** auf
+den Datenbank-Service. Ein kopierter Connection String wäre still ungültig,
+sobald Railway das Passwort beim Neuaufbau des Service rotiert.
+
+Backups sind eine Einstellung am Service und keine IaC-Option, deshalb der
+Klick im Dashboard. Ohne sie ist eine versehentliche Migration nicht rückholbar.
+
+### Agent-Service
+
+Baut über das `Dockerfile` im Repo-Root. Zwei Einträge in
+`.railway/railway.ts` sind wichtig:
 
 | Feld | Wert | Warum |
 |---|---|---|
-| `startCommand` | `node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs` | Migration **und** Start in einem Befehl – siehe unten |
 | `healthcheckPath` | `/healthz` | prüft zusätzlich die Datenbankverbindung. **Nicht** `/health` – der Pfad ist von Mastra belegt und liefert `{"success":true}` ohne DB-Prüfung |
+| `healthcheckTimeout` | `180` | damit die Migration beim allerersten Deploy (43 Tabellen plus Indizes) nicht in den Health-Check läuft |
+
+Ein `startCommand` steht dort bewusst **nicht**: Migration und Start entscheidet
+der `ENTRYPOINT` des Images anhand von `RUN_MODE` – siehe unten.
 
 #### Warum die Migration im Dockerfile steht
 
@@ -514,50 +755,45 @@ Ein **Volume auf `/app/data`** mounten – dort liegen die Belegbilder. Ohne das
 sind sie nach jedem Redeploy weg, auch wenn die Belegdaten in Postgres
 überleben. Siehe „Offene Lücke: Objektspeicher".
 
-### 3. Prune-Service (Cron)
+### Prune-Service (Cron)
 
-Zweiter Service aus **demselben Repo** – gleiches Image, anderer Start-Befehl.
+Zweiter Service aus **demselben Repo** – gleiches Image, andere Rolle.
 
-> **Der Punkt, an dem es sonst schiefgeht:** Railway liest per Default die
-> `railway.json` im Repo-Root, und laut Doku gilt *„Configuration defined in code
-> will always override values from the dashboard."* Ein zweiter Service aus
-> demselben Repo würde also `startCommand` und `healthcheckPath` des Agenten
-> erben – und ein im Dashboard gesetzter
-> Start-Befehl würde daran **nichts** ändern. Der Cron-Job startete dann den
-> Server statt des Prune-Skripts, liefe nie zu Ende, und weil Railway einen
-> neuen Lauf überspringt, solange der vorherige noch läuft, liefe er genau
+> **Der Punkt, an dem es früher schiefging:** unter Config as Code las Railway per
+> Default die `railway.json` im Repo-Root, und *„Configuration defined in code will
+> always override values from the dashboard."* Ein zweiter Service aus demselben
+> Repo erbte damit `startCommand` und `healthcheckPath` des Agenten, und ein im
+> Dashboard gesetzter Start-Befehl änderte daran **nichts**. Der Cron-Job startete
+> dann den Server statt des Prune-Skripts, lief nie zu Ende, und weil Railway
+> einen neuen Lauf überspringt, solange der vorherige noch läuft, lief er genau
 > einmal und danach nie wieder.
+>
+> Unter Infrastructure as Code entfällt das: jeder Service trägt seine eigene
+> Konfiguration im Objekt, es gibt keine Datei, die per Default für alle gilt.
 
-Deshalb hat dieser Service eine eigene Config-Datei, `railway.prune.json`:
+Umgeschaltet wird über eine **Umgebungsvariable**, nicht über einen Start-Befehl:
 
-```json
-{
-  "deploy": {
-    "startCommand": "node .mastra/output/scripts/prune.mjs",
-    "cronSchedule": "0 3 * * *",
-    "restartPolicyType": "NEVER"
-  }
-}
+```ts
+const prune = service('mastra-prune', {
+  source: github(REPO, { branch: BRANCH }),
+  build: { builder: 'DOCKERFILE', dockerfilePath: 'Dockerfile' },
+  deploy: { cronSchedule: '0 3 * * *', restartPolicyType: 'NEVER' },
+  env: { DATABASE_URL: db.env.DATABASE_URL, RUN_MODE: 'prune' },
+});
 ```
 
-Keine Migration im Start-Befehl (die gehört zum Agent-Deploy, nicht zu jedem
-nächtlichen Lauf), kein `healthcheckPath` (der Job hört auf keinem Port), und
+`RUN_MODE=prune` wählt in `scripts/docker-entrypoint.sh` die zweite Rolle
+desselben Images – aus demselben Grund, aus dem die Migration im Image steht:
+Start-Befehle aus der Plattform-Config wurden in diesem Projekt stillschweigend
+nicht angewandt, Variablen kamen nachweislich an.
+
+Kein `healthcheckPath` (der Job hört auf keinem Port) und
 `restartPolicyType: NEVER` – ein Cron-Job soll terminieren, nicht neu starten.
 `scripts/prune.mjs` schliesst seinen Pool im `finally`, beendet sich also sauber,
-wie Railway es für Cron-Services verlangt.
+wie Railway es für Cron-Services verlangt. Keine Migration in dieser Rolle: die
+gehört zum Agent-Deploy, nicht zu jedem nächtlichen Lauf.
 
-**Einrichtung:**
-
-1. **New → GitHub Repo**, dasselbe Repo wählen. Service z. B. `mastra-prune` nennen.
-2. **Settings → Config-as-code / Railway Config File:** `/railway.prune.json`
-   eintragen. Der Pfad ist absolut ab Repo-Root und folgt dem Root Directory
-   **nicht** – das steht so in der Railway-Monorepo-Doku.
-3. **Variables:** `DATABASE_URL = ${{ Postgres.DATABASE_URL }}`, optional
-   `RETENTION_SPANS` / `RETENTION_SNAPSHOTS` / `RETENTION_MESSAGES`.
-4. Kein Volume, keine Domain, kein Health-Check.
-
-Der Zeitplan steht in `cronSchedule` und damit im Repo, nicht im Dashboard – aus
-demselben Grund: Config-as-Code gewinnt ohnehin. Railways Minimum ist 5 Minuten,
+Der Zeitplan steht im Repo, nicht im Dashboard. Railways Minimum ist 5 Minuten,
 Zeitzone ist UTC.
 
 Ungebremst wachsen zu lassen ist keine Option: die Span-Tabellen wachsen um
@@ -566,70 +802,72 @@ pro Beleg entsteht genau eine Zeile in `app.receipts`. Die Policies stehen in
 `scripts/prune.mjs` und sind über `RETENTION_*` justierbar, ohne den Agenten neu
 zu deployen. `app.receipts` hat bewusst keine Retention.
 
-### 4. Frontend-Service
+### Frontend-Service
 
-Vierter Service aus **demselben Repo**, mit eigener Config-Datei.
+Der Service entsteht durch `railway config apply` mit; anzulegen ist er nicht von
+Hand. Was in `.railway/railway.ts` dazu steht:
 
-1. **New → GitHub Repo**, dasselbe Repo. Service z. B. `receipt-frontend` nennen.
-2. **Settings → Railway Config File:** `/railway.frontend.json`. Der Pfad ist
-   absolut ab Repo-Root. Ohne diesen Eintrag erbt der Service `railway.json` und
-   startet den Agenten.
-3. **Variables:**
+```ts
+const frontend = service('receipt-frontend', {
+  source: github(REPO, { branch: BRANCH }),
+  build: { builder: 'DOCKERFILE', dockerfilePath: 'frontend/Dockerfile' },
+  deploy: { healthcheckPath: '/api/healthz', healthcheckTimeout: 60 },
+  env: {
+    DATABASE_URL: db.env.DATABASE_URL,
+    MASTRA_URL: privateUrl(agent, 4111),
+    FRONTEND_DB_POOL_MAX: '3',
+  },
+});
+```
 
-   ```
-   DATABASE_URL = ${{ Postgres.DATABASE_URL }}
-   MASTRA_URL   = http://${{ mastra-agent.RAILWAY_PRIVATE_DOMAIN }}:4111
-   FRONTEND_DB_POOL_MAX = 3
-   ```
+Kein Volume und keine Migration: die Oberfläche liest nur und erwartet
+`app.receipts` als vorhanden. `DATABASE_URL` zeigt als **Referenz** auf denselben
+Postgres-Service – keine zweite Datenbank, kein kopierter Connection String.
+`MASTRA_URL` wird nur für die Belegbilder gebraucht, die als Dateien am Volume
+des Agenten liegen, und läuft über Private Networking.
 
-   `DATABASE_URL` als **Referenz** auf denselben Postgres-Service – keine zweite
-   Datenbank, kein kopierter Connection String. `MASTRA_URL` über Private
-   Networking: gebraucht wird sie nur für die Belegbilder, die als Dateien am
-   Volume des Agenten liegen.
-4. Kein Volume, keine Migration. Health-Check `/api/healthz` (steht in der
-   Config-Datei) – er prüft die Datenbankverbindung mit.
-
-**Zur Erreichbarkeit:** die Oberfläche ist unauthentifiziert und zeigt die
-Belegdaten **aller** Nutzer. In diesem Setup steht sie unter der generierten
-`*.up.railway.app`-Domain – das ist eine bewusste Entscheidung für diese Version
-(kleines, festes Finanzteam) und in `frontend/README.md` begründet. Wer die URL
-hat, sieht die Daten. Die Vorkehrungen dafür, dass Auth später ohne Umbau
-nachrüstbar ist, stehen ebenfalls dort (`lib/receipts/scope.ts`).
+**Domain:** `networking` bleibt in der Definition unangetastet, damit ein im
+Dashboard generiertes `*.up.railway.app` nicht wegkonfiguriert wird. Die
+Oberfläche ist unauthentifiziert und zeigt die Belegdaten **aller** Nutzer – eine
+bewusste Entscheidung für diese Version (kleines, festes Finanzteam), begründet in
+`frontend/README.md`. Wer die URL hat, sieht die Daten.
 
 **Poolgrösse ernst nehmen:** eine kleine Railway-Postgres-Instanz erlaubt rund 20
 Verbindungen. Agent 8 (`DB_POOL_MAX`) + Frontend 3 (`FRONTEND_DB_POOL_MAX`) +
 Migrations-/Prune-Job lassen Luft; zwei Environments auf **einer** Instanz wären
 schon zu viel – deshalb pro Environment eine eigene Datenbank.
 
-### 5. Staging und Produktion
+### Staging und Produktion
 
-Zwei Railway-Environments mit je **eigenem** Postgres-Service. Der Ablauf:
-
-1. Nach `staging` deployen. `preDeployCommand` fährt die Migration dort.
-2. Prüfen: `GET /healthz` muss `{"status":"ok","database":"up"}` liefern, und ein
-   Beleg muss in Teams durchlaufen (Vorlage → „passt" → Zeile in `app.receipts`).
-3. Erst dann nach `production` promoten.
+Zwei Railway-Environments mit je **eigenem** Postgres-Service, beide aus
+derselben `.railway/railway.ts`. Was sie unterscheidet, ist allein das per
+`railway link` gewählte Environment.
 
 Eine Migration, die auf Staging durchläuft, läuft auf Produktion durch – solange
 beide Environments dieselbe Postgres-Major-Version fahren. Der lokale
 Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
 
-**Reihenfolge beim allerersten Deploy:** zuerst Postgres, dann `mastra-agent`
-(dessen `startCommand` legt beide Schemas an), erst danach `mastra-prune` und
-`receipt-frontend`. Der Prune-Job auf einer leeren Datenbank würde über fehlende
-Tabellen stolpern, und das Frontend migriert nichts – es erwartet `app.receipts`
-als bereits vorhanden.
+**Warum die Reihenfolge im Runbook so ist:** der Agent legt beim ersten Start
+beide Schemas an (`ENTRYPOINT`, `RUN_MODE` ungesetzt). Der Prune-Job auf einer
+leeren Datenbank würde über fehlende Tabellen stolpern, und das Frontend migriert
+nichts – es erwartet `app.receipts` als vorhanden. Deshalb: Postgres, Agent,
+dann der Rest.
 
-**Hinweis zur Haltbarkeit:** Railway markiert Config-as-Code (`railway.json`) als
-deprecated, mit Umstellung auf Infrastructure as Code bis **1. Dezember 2026**.
-Bis dahin funktioniert das Setup wie beschrieben; danach werden alle drei Dateien
-in das neue Format zu überführen sein.
+**Production nicht neu erfinden:** derselbe Ablauf ab Schritt 3 des Runbooks,
+und erst nach grüner Abnahme auf staging. Die Secrets sind pro Environment neu zu
+setzen – `preserve()` hat auf einem frischen Environment nichts zu erhalten.
+
+**Stand der Umstellung:** die Definition liegt als Infrastructure as Code in
+`.railway/railway.ts`. `railway.json` und `railway.prune.json` liegen noch daneben
+und steuern Agent und Prune-Job, bis `railway config apply` einmal durchgelaufen
+ist – danach gehören sie gelöscht. Der harte Stichtag für Config as Code ist
+**2026-12-01**.
 
 ### Umgebungsvariablen
 
 | Variable | Pflicht | Zweck |
 |---|---|---|
-| `DATABASE_URL` | **ja** | Postgres. Auf Railway als `${{ Postgres.DATABASE_URL }}` |
+| `DATABASE_URL` | **ja** | Postgres. Auf Railway als Referenz, gesetzt in `.railway/railway.ts` |
 | `MASTRA_MODEL` | ja | Modell als `<provider>/<model>`, muss vision-fähig sein |
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | ja (der passende) | Key des Providers aus `MASTRA_MODEL` |
 | `TEAMS_APP_ID` | für Teams | App-(Client-)ID der Azure Bot Registration |
@@ -638,6 +876,7 @@ in das neue Format zu überführen sein.
 | `DB_POOL_MAX` | nein | Poolgrösse, Default 8. Höher nur mit grösserer Instanz |
 | `RECEIPT_MAX_CORRECTION_ROUNDS` | nein | Korrekturrunden vor dem Abbruch, Default 3 |
 | `RETENTION_SPANS` / `_SNAPSHOTS` / `_MESSAGES` | nein | nur für den Prune-Service |
+| `RUN_MODE` | nein | `prune` / `migrate`; ungesetzt = migrieren und Server starten |
 | `PORT` | nein | setzt Railway selbst; lokal Default 4111 |
 | `MASTRA_HOST` | nein | Default `0.0.0.0` |
 | `RECEIPT_DATA_DIR` | nein | Verzeichnis für die Belegbilder; Default `/app/data` |
@@ -651,8 +890,8 @@ Für den Frontend-Service (`frontend/.env.example`):
 
 | Variable | Pflicht | Zweck |
 |---|---|---|
-| `DATABASE_URL` | **ja** | Dieselbe Instanz. Auf Railway `${{ Postgres.DATABASE_URL }}` |
-| `MASTRA_URL` | für Belegbilder | Adresse des Agent-Service. Auf Railway `http://${{ mastra-agent.RAILWAY_PRIVATE_DOMAIN }}:4111` |
+| `DATABASE_URL` | **ja** | Dieselbe Instanz, als Referenz auf den Postgres-Service |
+| `MASTRA_URL` | für Belegbilder | Adresse des Agent-Service über Private Networking |
 | `FRONTEND_DB_POOL_MAX` | nein | Poolgrösse des Frontends, Default 3 |
 | `PORT` | nein | setzt Railway selbst; lokal 3000 |
 
@@ -668,6 +907,6 @@ Für den Frontend-Service (`frontend/.env.example`):
   Volume verliert sie.
 - **Die Weboberfläche ist unauthentifiziert** und zeigt die Belegdaten aller
   Nutzer – die Mandantentrennung des Teams-Bots gilt dort ausdrücklich nicht. Für
-  diese Version akzeptiert (siehe „4. Frontend-Service" und
+  diese Version akzeptiert (siehe „Frontend-Service" und
   `frontend/README.md`). Wenn der Nutzerkreis wächst, ist das die erste Baustelle;
   `frontend/lib/receipts/scope.ts` ist die dafür vorgesehene Stelle.

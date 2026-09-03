@@ -36,6 +36,7 @@
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.10",
     "mastra": "^1.27.2",
+    "railway": "^3.11.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
   },

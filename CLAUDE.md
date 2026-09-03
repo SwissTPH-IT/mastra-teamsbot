@@ -10,7 +10,7 @@ Backend (repo root, Node >= 22):
 docker compose up postgres -d   # required for almost everything below
 npm run dev              # mastra dev — hot reload, http://localhost:4111
 npm run build            # mastra build --studio  (output: .mastra/output/index.mjs)
-npm run typecheck        # tsc --noEmit
+npm run typecheck        # tsc --noEmit — also covers .railway/railway.ts
 npm test                 # vitest run (needs TEST_DATABASE_URL, else skipped)
 npm run db:generate      # drizzle-kit generate — after editing src/db/schema.ts
 npm run db:deploy        # drizzle migrations + storage.init(); same cmd Railway runs
@@ -165,7 +165,9 @@ argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed i
 
 - Comments and all user-facing strings (agent instructions, error messages, tool descriptions) are **German**. `receipt-agent.ts` / `receipt-extraction-workflow.ts` internals are English. Match the file you're editing. The frontend is German throughout, including comments; its UI text avoids umlauts in a few identifiers only where a filename or CSV header travels into Excel.
 - Comments in this codebase explain *why* a non-obvious choice was made (route naming, `0.0.0.0` binding, sequential extraction). Keep that style rather than restating code.
-- There are three Railway config files, one per service: `railway.json` (agent, the default), `railway.prune.json` (cron), `railway.frontend.json` (web UI). The last two **must** be set explicitly per service — config-as-code overrides the dashboard, so without them a service inherits the agent's start command.
+- **Deployment config lives in `.railway/railway.ts`** (Railway Infrastructure as Code), not in `railway.json`. Config as Code is deprecated: existing files work until 2026-12-01, and since 2026-08-28 a service that never used it **cannot opt in** — so the new frontend service could not have a `railway.frontend.json` at all. The file is applied by CLI (`railway config pull --force` → `plan` → `apply`), once per environment, never at deploy time. Read the `plan` output before applying; a service-name mismatch reads as create-new + destroy-old. `railway.json` / `railway.prune.json` still sit in the repo and still drive the agent and prune services; they get deleted right after the first successful `apply`, not before.
+- In that file: `dockerfilePath` is a per-service option, so one repo serving three services needs no per-service config file. `DATABASE_URL` is a real reference (`db.env.DATABASE_URL`). Secrets use `preserve()` — never put them in the repo. `MASTRA_URL` must be a **literal** string with Railway's `${{Service.VAR}}` syntax, because a composed value cannot interpolate a reference object (`agent.env.RAILWAY_PRIVATE_DOMAIN` would stringify to `[object Object]`); `privateUrl()` wraps that.
+- The prune service is selected by `RUN_MODE=prune`, not a start command — `scripts/docker-entrypoint.sh` switches roles on that variable, because start commands from platform config were silently not applied in this project while variables demonstrably arrive.
 - The frontend image builds from the **repo root** context (`docker build -f frontend/Dockerfile .`), because it needs `src/db` and the root lockfile. The root `.dockerignore` therefore no longer excludes `frontend/`, and the agent's Dockerfile copies `frontend/package.json` so `npm ci --workspaces=false` can validate the lockfile.
 - Persistence is split: structured data in Postgres (schemas `mastra` and `app`), receipt *images* still as files under `./data/uploads/`. `receipts.file_reference` holds `local:uploads/<id>` — there is no object store yet, and that prefix scheme exists so adding one is a data migration over one column.
 - `RECEIPT_DATA_DIR` defaults to `/app/data`, so running the backend outside Docker without setting it writes to an absolute container path.
