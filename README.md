@@ -402,28 +402,52 @@ dort:
 | `startCommand` | `node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs` | Migration **und** Start in einem Befehl – siehe unten |
 | `healthcheckPath` | `/healthz` | prüft zusätzlich die Datenbankverbindung. **Nicht** `/health` – der Pfad ist von Mastra belegt und liefert `{"success":true}` ohne DB-Prüfung |
 
-#### Warum die Migration im `startCommand` steht und nicht im `preDeployCommand`
+#### Warum die Migration im Dockerfile steht
 
-Railways `preDeployCommand` ist der lehrbuchmässige Ort dafür. In diesem Projekt hat
-er sich als unzuverlässig erwiesen: konfiguriert, aber im Deploy nicht ausgeführt.
-Der Agent startete gegen eine leere Datenbank und crashte in einer Endlosschleife
-mit `relation "mastra.mastra_schedules" does not exist` – Mastra liest beim Boot
+Der lehrbuchmässige Ort wäre Railways `preDeployCommand`. In diesem Projekt wurde
+er konfiguriert und **nicht ausgeführt**; derselbe Befehl als `startCommand` in der
+`railway.json` ebenfalls nicht. Der Agent startete beide Male gegen eine leere
+Datenbank und crashte in einer Endlosschleife mit
+`relation "mastra.mastra_schedules" does not exist` – Mastra liest beim Boot
 `mastra_schedules` und `mastra_workflow_definitions` und bricht ab, wenn sie fehlen.
 
-Das Tückische daran: laut Railway-Doku stoppt ein **fehlgeschlagener** Pre-Deploy den
-Deploy („the deployment will not proceed"). Ein **übersprungener** stoppt nichts – der
-Fehler taucht erst im Runtime-Log des crashenden Containers auf, nicht als
-Deploy-Fehler.
+Das Tückische: laut Railway-Doku stoppt ein **fehlgeschlagener** Pre-Deploy den
+Deploy („the deployment will not proceed"). Ein **übersprungener** stoppt nichts, und
+eine nicht angewandte Config meldet sich gar nicht. Der Fehler taucht erst im
+Runtime-Log des crashenden Containers auf, nie als Deploy-Fehler.
 
-Im `startCommand` ist die Reihenfolge dagegen erzwungen: `&&` startet den Server nur,
-wenn die Migration mit Exit-Code 0 durchgelaufen ist. Sie läuft dadurch bei jedem
-Container-Start erneut – das ist unkritisch, weil beide Teile idempotent sind
-(Drizzle führt nur neue Migrationen aus, `storage.init()` legt nur fehlende Tabellen
-an) und zusammen rund eine Sekunde brauchen. Nebeneffekt: es ist derselbe Befehl wie
-in `docker-compose.yml`, lokal und auf Railway läuft also dasselbe.
+Deshalb steht die Migration im **`CMD` des Dockerfiles**:
+
+```dockerfile
+CMD ["sh", "-c", "node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs"]
+```
+
+Das ist der Standardbefehl des Images und greift auch dann, wenn die
+Plattform-Config gar nicht angewandt wird. `railway.json` setzt denselben Befehl
+noch einmal als `startCommand` – identische Zeile, kein Widerspruch, nur zwei
+Wege zum selben Ergebnis.
+
+Das `&&` erzwingt die Reihenfolge im Prozess statt in der Plattform: der Server
+startet nur, wenn die Migration mit Exit-Code 0 durchgelaufen ist. Sie läuft dadurch
+bei jedem Container-Start – unkritisch, weil beide Teile idempotent sind (Drizzle
+führt nur neue Migrationen aus, `storage.init()` legt nur fehlende Tabellen an) und
+zusammen rund eine Sekunde brauchen.
 
 Der `healthcheckTimeout` steht auf 180 Sekunden, damit die Migration beim allerersten
 Deploy (43 Tabellen plus Indizes) nicht in den Health-Check läuft.
+
+#### Datenbank von aussen migrieren (Notfall)
+
+Hängt die Datenbank leer fest und du willst nicht auf einen Deploy warten: am
+Postgres-Service **Settings → Networking → Public Networking** einschalten. Railway
+legt dann einen TCP-Proxy an und befüllt `DATABASE_PUBLIC_URL`. Damit lokal:
+
+```bash
+DATABASE_URL="<DATABASE_PUBLIC_URL>" npm run db:deploy
+```
+
+Die interne `DATABASE_URL` (`*.railway.internal`) ist von aussen **nicht**
+erreichbar – nur aus dem Railway-Netz.
 
 Der Agent selbst migriert nichts: `PostgresStore` läuft mit `disableInit: true`
 (`src/mastra/storage.ts`). Das ist das in der

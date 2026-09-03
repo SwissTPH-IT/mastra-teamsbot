@@ -55,4 +55,19 @@ EXPOSE 4111
 # (/app/data) aus den Service-Settings.
 RUN mkdir -p /app/data
 
-CMD ["node", ".mastra/output/index.mjs"]
+# Migration UND Start, verkettet mit &&: der Server startet nur, wenn die
+# Migration mit Exit-Code 0 durchgelaufen ist.
+#
+# Das steht bewusst hier im Image und nicht nur in railway.json. Auf Railway
+# wurde erst ein preDeployCommand und danach ein startCommand aus der
+# railway.json stillschweigend nicht ausgefuehrt - der Agent startete gegen
+# eine leere Datenbank und crashte in einer Endlosschleife mit
+# 42P01 "relation mastra.mastra_schedules does not exist".
+#
+# Im Dockerfile-CMD greift es auch dann, wenn die Plattform-Config nicht
+# angewendet wird: das ist der Standardbefehl des Images. railway.json setzt
+# denselben Befehl noch einmal, das ist dieselbe Zeile, kein Widerspruch.
+#
+# Beide Teile sind idempotent (Drizzle fuehrt nur neue Migrationen aus,
+# storage.init() legt nur fehlende Tabellen an), der Lauf kostet ~1 Sekunde.
+CMD ["sh", "-c", "node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs"]
