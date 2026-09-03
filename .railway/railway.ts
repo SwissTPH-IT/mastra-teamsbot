@@ -12,6 +12,13 @@
 //
 // `apply` deployt KEINEN Code, es setzt nur Konfiguration. Gebaut wird durch
 // einen Push auf den Branch, den Railway am Service beobachtet.
+//
+// WARUM railway.json WEG MUSS: die Datei im Repo-Root wird beim BUILD gelesen,
+// fuer jeden Service, der aus diesem Repo baut. Ihr `dockerfilePath: Dockerfile`
+// hat gegen das `build` hier gewonnen - der Frontend-Service baute dadurch den
+// Agenten und fiel im Health-Check mit 404 auf /api/healthz durch. Die
+// deploy-Werte kamen dagegen aus dieser Datei. Solange railway.json existiert,
+// ist also offen, welche Haelfte gilt.
 
 import { defineRailway, github, postgres, preserve, project, service, volume } from "railway/iac";
 
@@ -23,12 +30,18 @@ export default defineRailway(() => {
   const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
   const mastraTeamsbotVolume8j43 = volume("mastra-teamsbot-volume-8j43", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
 
-  // Unveraendert aus `pull`. Build und Health-Check dieses Service kommen noch
-  // aus railway.json (Config as Code) und stehen deshalb absichtlich NICHT hier
-  // - sonst gaebe es zwei Quellen der Wahrheit. Beim Ausbauen von railway.json
-  // wandern sie hierher.
+  // Build und Deploy stehen hier, weil railway.json geloescht wird. Ohne
+  // `builder: DOCKERFILE` wuerde Railway den Builder wieder selbst raten.
+  //
+  // Diese Werte sind 1:1 die aus der alten railway.json - der `plan` zeigt sie
+  // deshalb als "change" am Agenten, ohne dass sich am Verhalten etwas aendert.
   const mastraAgent = service("mastra-agent", {
     source: github(REPO, { checkSuites: false }),
+    build: { builder: "DOCKERFILE", dockerfilePath: "Dockerfile" },
+    // /healthz, NICHT /health: den Pfad belegt Mastra und antwortet
+    // {"success":true} ohne DB-Pruefung. 180 s, damit die Migration beim ersten
+    // Deploy nicht in den Health-Check laeuft.
+    deploy: { healthcheckPath: "/healthz", healthcheckTimeout: 180, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
     replicas: { [REGION]: 1 },
     volumeMounts: { "/app/data": mastraTeamsbotVolume8j43 },
     env: { DATABASE_URL: preserve(), MASTRA_MODEL: preserve(), MASTRA_TELEMETRY_DISABLED: preserve(), OPENROUTER_API_KEY: preserve(), TEAMS_APP_ID: preserve(), TEAMS_APP_PASSWORD: preserve(), TEAMS_APP_TENANT_ID: preserve() },
