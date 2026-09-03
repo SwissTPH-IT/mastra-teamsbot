@@ -1,8 +1,0 @@
-node_modules
-.next
-.agents
-.claude
-.git
-*.log
-.env*
-!.env.example

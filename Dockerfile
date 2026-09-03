@@ -10,8 +10,13 @@ ENV MASTRA_TELEMETRY_DISABLED=1
 
 # Abhängigkeiten zuerst (Docker-Layer-Caching). `npm ci` statt `npm install`,
 # damit der Build reproduzierbar am Lockfile hängt.
+# frontend/package.json muss mit: `npm ci` in einem Workspace-Repo verlangt die
+# package.json jedes Mitglieds, sonst bricht es gegen das Lockfile ab.
+# `--workspaces=false` installiert trotzdem nur die Abhaengigkeiten des Roots -
+# der Agent-Build zieht keine React-/Next-Pakete mit.
 COPY package.json package-lock.json ./
-RUN npm ci
+COPY frontend/package.json ./frontend/
+RUN npm ci --workspaces=false
 
 COPY tsconfig.json ./
 COPY src ./src

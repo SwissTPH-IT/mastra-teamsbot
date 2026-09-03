@@ -9,4 +9,9 @@ data
 .git
 .claude
 *.log
-frontend
+
+# frontend/ ist NICHT ausgeschlossen: der Frontend-Build laeuft aus diesem
+# Kontext (frontend/Dockerfile), und der Agent-Build braucht
+# frontend/package.json fuer `npm ci` im Workspace.
+frontend/node_modules
+frontend/.next

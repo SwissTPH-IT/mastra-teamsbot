@@ -1,15 +1,22 @@
-# Belegerfassung – Mastra + assistant-ui, vollständig in Docker
+# Belegerfassung – Mastra + Microsoft Teams, vollständig in Docker
 
 Drei Container, ein `docker compose up`:
 
 | Service | Port | Was drin läuft |
 |---|---|---|
 | `postgres` | 5432 | Postgres 17: Schema `mastra` (von Mastra verwaltet) und Schema `app` (Fachdaten) |
-| `mastra` | 4111 | Mastra-Server: Agenten, Workflows, Upload-Endpunkte, Studio-UI |
-| `frontend` | 3000 | Next.js + [assistant-ui](https://www.assistant-ui.com/): das Endnutzer-Interface |
+| `mastra` | 4111 | Mastra-Server: Agenten, Workflows, Teams-Webhook, Upload-Endpunkte, Studio-UI |
+| `frontend` | 3000 | Next.js: die Weboberfläche auf die erfassten Belegdaten |
 
-Ein Endnutzer öffnet **http://localhost:3000**, zieht ein Belegfoto ins Eingabefeld
-und sieht die extrahierten Daten als Karte im Chat. Nichts weiter zu konfigurieren.
+**Zwei Zugänge mit zwei Zielgruppen** – und der Unterschied prägt das Datenmodell:
+
+| | Wer | Was | Mandantentrennung |
+|---|---|---|---|
+| **Microsoft Teams** | Endnutzer | Beleg einreichen, Vorschlag bestätigen oder korrigieren | hart verdrahtet: jeder sieht nur seine eigenen Belege |
+| **Weboberfläche** | Finanzteam | die erfassten Daten ansehen, durchsuchen, als CSV exportieren | bewusst keine: übergreifende Ansicht, der Nutzer ist Datenfeld, nicht Berechtigungsgrenze |
+
+Erfasst wird ausschliesslich über Teams. Die Weboberfläche ist **read-only** und
+hat **kein Login** – siehe `frontend/README.md`, Abschnitt „Kein Login".
 
 ## Voraussetzungen
 
@@ -42,38 +49,47 @@ und sieht die extrahierten Daten als Karte im Chat. Nichts weiter zu konfigurier
 
    | URL | Zweck |
    |---|---|
-   | http://localhost:3000 | **Belegerfassung** – das Interface für Endnutzer |
+   | http://localhost:3000/belege | **Belegtabelle** – die Sicht des Finanzteams |
    | http://localhost:4111 | Mastra Studio – Agenten/Workflow direkt testen, Traces ansehen |
    | http://localhost:4111/swagger-ui | REST-API aller Endpunkte |
+
+   Belege einreichen geht nur über Teams (siehe „Microsoft Teams: der
+   Human-in-the-Loop-Flow"). Ohne eingerichtete Bot-Registration bleibt die
+   Tabelle leer – zum Ausprobieren lässt sich der Extraktions-Workflow im Studio
+   direkt starten.
 
 ## Der Ablauf
 
 ```
-Browser (assistant-ui)
-  │  1. Bild anhängen
-  ├─────────► POST /api/uploads            (Next-Proxy)
-  │           └─► POST /receipts/upload   (Mastra)  → Datei nach /app/data/uploads
-  │                                                     ← { uploadId }
-  │  2. Nachricht senden – im Text steht nur
-  │     [Beleg] datei="…" uploadId="…"
-  ├─────────► POST /api/chat               (Next-Proxy)
-  │           └─► POST /chat/receiptChatAgent (Mastra, chatRoute)
-  │                 └─► Tool "extractReceipt"
-  │                       └─► receipt-workflow
-  │                             ├─ load-receipt      Datei → Data-URL
-  │                             ├─ extract-receipt   Vision-Agent → receiptSchema
-  │                             └─ write-receipt-json /app/data/receipts/<id>.json
-  │  3. Tool-Ergebnis wird als Belegkarte gerendert
-  ▼
+Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
+           └─ handleTeamsReceipt ─► receipt-review-workflow
+                                      ├─ Bild ablegen        → data/uploads/<uploadId>
+                                      ├─ receipt-extraction-workflow (verschachtelt)
+                                      │    ├─ load-receipt      Datei → Data-URL
+                                      │    ├─ extract-receipt   Vision-Agent → receiptSchema
+                                      │    └─ write-receipt-json data/receipts/<id>.json
+                                      ├─ review-candidate ─► suspend ─► Vorlage im Thread
+                                      │      ▲                              │
+                                      │      └──── run.resume() ◄───────────┘
+                                      └─ persist-receipt    → app.receipts
+
+Browser ─► /belege ──────────► app.receipts (lesend, Drizzle, serverseitig)
+           /api/export ──────► app.receipts (lesend, gestreamt als CSV)
+           /api/belege/<id>/bild ─► GET /receipts/<uploadId>/file  (Proxy auf den Agenten)
 ```
 
-Der entscheidende Punkt: **das Bild reist nie durch den Chat-Kontext.** Der Upload
-passiert separat, in der Nachricht steht nur die `uploadId`. Nur der Vision-Agent
+Der entscheidende Punkt: **das Bild reist nie durch den Chat-Kontext.** Die Datei
+wird abgelegt und weitergegeben wird nur die `uploadId`. Nur der Vision-Agent
 innerhalb des Workflows sieht die Bilddaten – einmal, pro Beleg.
 
-Mehrere Belege in einer Nachricht sind vorgesehen: der Agent übergibt alle
-`uploadId`s in einem Tool-Aufruf, der Workflow läuft pro Bild einmal, und für
-jedes Ergebnis erscheint eine eigene Karte.
+Und: **in die Datenbank wird nichts geschrieben, bevor der Nutzer bestätigt hat.**
+Kein Schreiben-und-später-aufräumen. Der Kandidatensatz liegt bis dahin im
+Workflow-State und damit in `mastra_workflow_snapshot`.
+
+Die Weboberfläche greift auf denselben Datenbestand zu, aber ausschliesslich
+lesend und über eine eigene Query-Schicht (`frontend/lib/receipts/`). Sie
+importiert das Drizzle-Schema aus `src/db/schema.ts` und dupliziert es nicht;
+Migrationen bleiben hier.
 
 ## Was ist enthalten
 
@@ -115,21 +131,40 @@ jedes Ergebnis erscheint eine eigene Karte.
 
 ### Frontend (`frontend/`)
 
+Read-only-Oberfläche auf `app.receipts`: Tabelle, Detailansicht, CSV-Export.
+Details in `frontend/README.md`; hier nur die Einordnung.
+
 | Datei | Zweck |
 |---|---|
-| `app/assistant.tsx` | Runtime, Attachment-Adapter, Thread mit Beleg-Karte statt Tool-Log |
-| `app/api/chat/route.ts` | Proxy auf `chatRoute()` – streamt SSE unverändert durch |
-| `app/api/uploads/route.ts` | Proxy für den Datei-Upload |
-| `app/api/uploads/[uploadId]/file/route.ts` | Proxy für die Bildvorschau |
-| `lib/receipt-uploads.ts` | `AttachmentAdapter`: lädt beim Anhängen hoch, setzt den Marker |
-| `components/receipt/receipt-card.tsx` | Die Ergebniskarte (Kopf, Positionen, Summen, Hinweise) |
-| `components/receipt/receipt-tool-ui.tsx` | Wählt Karte vs. Standard-Tool-Anzeige |
-| `components/receipt/receipt-message-text.tsx` | Macht aus der Markerzeile eine Bildvorschau |
-| `components/assistant-ui/*` | Von `npx assistant-ui@latest create` erzeugt, Texte eingedeutscht |
+| `app/belege/page.tsx` | Die Tabelle: Filterleiste + Ergebnis, Server Component |
+| `app/belege/[id]/page.tsx` | Detailansicht eines Belegs inkl. Belegbild |
+| `app/api/export/route.ts` | CSV, serverseitig gestreamt, dieselben Filter wie die Ansicht |
+| `app/api/healthz/route.ts` | Health-Check inklusive `SELECT 1` |
+| `app/api/belege/[id]/bild/route.ts` | Proxy auf `GET /receipts/:uploadId/file` beim Agenten |
+| `lib/db/client.ts` | Eigener kleiner Pool (Default 3) + Drizzle |
+| `lib/receipts/scope.ts` | `ReceiptScope` – der Einhängepunkt für eine spätere Berechtigung |
+| `lib/receipts/where.ts` | `buildReceiptWhere()` – die **eine** Stelle für Filterlogik |
+| `lib/receipts/queries.ts` | `listReceipts` / `countReceipts` / `getReceipt` / `streamReceipts` |
+| `lib/export/formats.ts` | Format-Registry, damit `.xlsx` später daneben passt |
 
-`frontend/.agents/` und `frontend/.claude/` sind Referenzdokumentation, die der
-assistant-ui-Scaffolder mitbringt. Für den Betrieb irrelevant (per `.dockerignore`
-ausgeschlossen), zum Weiterbauen aber nützlich.
+Drei Dinge, die dabei absichtlich so sind:
+
+- **Das Schema wird importiert, nicht dupliziert.** `frontend/` ist ein
+  npm-Workspace dieses Repos und importiert `mastra-teamsbot/db/schema` (also
+  `src/db/schema.ts`). Es führt keine Migrationen aus, definiert keine Tabelle
+  und greift nie auf `mastra_*` zu.
+- **Kein assistant-ui, kein Chat, kein LLM-Aufruf.** Auf dieser Seite des Flows
+  gibt es keinen AI-Use-Case; eine Chat-Oberfläche zwischen Nutzer und Tabelle
+  macht das Filtern langsamer, nicht schneller. Die Datenzugriffsschicht ist von
+  der UI getrennt, damit AI-Funktionen später ein Zusatz wären.
+- **Kein Login.** Bewusst noch nicht – siehe `frontend/README.md` und
+  „Vor dem Livegang beachten".
+
+Damit sind zwei Backend-Bausteine derzeit **ohne Aufrufer**: `chatRoute()` mit
+`receiptChatAgent`/`extract-receipt-tool` und `POST /receipts/upload`. Beide sind
+weiterhin über Studio und die REST-API erreichbar und bleiben stehen, bis
+entschieden ist, ob der Web-Upload-Pfad zurückkommt. `GET /receipts/:uploadId/file`
+wird gebraucht – die Detailansicht holt das Belegbild darüber.
 
 ## Persistenz
 
@@ -175,7 +210,11 @@ bei uns.
 
 Die Poolgrösse steht auf 8 (`DB_POOL_MAX`), nicht auf dem `PostgresStore`-Default
 von 20: eine kleine Railway-Instanz erlaubt rund 20 Verbindungen insgesamt, und
-davon brauchen auch der Migrations-Job und später das Frontend welche.
+davon brauchen auch der Migrations-Job und das Frontend welche.
+
+Das Frontend hat einen **eigenen** Pool (`frontend/lib/db/client.ts`,
+`FRONTEND_DB_POOL_MAX`, Default 3) – es ist ein anderer Prozess. Es teilt
+lediglich die Instanz und das Schema, nicht den Pool.
 
 ### Offene Lücke: Objektspeicher
 
@@ -189,36 +228,40 @@ Schema-Änderung. Bis dahin gilt: **ohne Volume auf `/app/data` sind die
 Originalbilder nach jedem Redeploy weg**, auch wenn die Belegdaten in Postgres
 überleben.
 
-## Zwei Wege vom Browser zu Mastra
+## Wie der Browser an die Daten kommt
 
-**Variante A – Proxy (aktiv, Standard).** Der Browser spricht nur mit dem
-Frontend; die Route Handler unter `app/api/*` reden serverseitig mit
-`http://mastra:4111`. Kein CORS, Mastra muss nicht nach außen exponiert sein,
-und die Adresse ist eine reine Laufzeitvariable (`MASTRA_URL`).
+Gar nicht direkt: die Weboberfläche liest die Datenbank **serverseitig** (Server
+Components und Route Handler). Es gibt keinen Datenbankzugriff aus dem Browser
+und keinen Connection String im Client-Bundle.
 
-**Variante B – direkt.** So beschreibt es die
-[Mastra-Doku](https://mastra.ai/integrations/agentic-ui/assistant-ui): der
-Browser ruft `http://localhost:4111/chat/receiptChatAgent` selbst auf. Dafür ist
-`server.cors` in `src/mastra/index.ts` bereits auf `FRONTEND_ORIGIN` gesetzt. In
-`app/assistant.tsx` dann:
+Mit dem Mastra-Server spricht das Frontend nur noch an einer Stelle – für das
+Belegbild, das als Datei im Datenverzeichnis des Agenten liegt und nicht in
+Postgres. Das läuft über den eigenen Route Handler
+`/api/belege/<id>/bild` und damit serverseitig; `MASTRA_URL` ist bewusst keine
+`NEXT_PUBLIC_*`-Variable und landet nicht im Browser.
 
-```tsx
-new AssistantChatTransport({ api: process.env.NEXT_PUBLIC_MASTRA_URL! })
-```
-
-Nachteil: `NEXT_PUBLIC_*` wird in den Build eingebacken, ein Adresswechsel
-erfordert also einen Rebuild. Deshalb ist A voreingestellt.
+Damit ist `FRONTEND_ORIGIN` / `server.cors` in `src/mastra/index.ts` für den
+Normalbetrieb ohne Funktion – kein Browser ruft Mastra direkt auf. Die Freigabe
+bleibt stehen, weil sie beim direkten Arbeiten gegen Studio und die REST-API
+nützlich ist.
 
 ## Entwickeln
 
-**Frontend mit Hot-Reload** (Mastra bleibt im Container):
+**Frontend mit Hot-Reload** (Postgres und Mastra bleiben im Container):
 
 ```bash
-docker compose up mastra
+npm install                  # im REPO-ROOT: frontend/ ist ein npm-Workspace
+docker compose up postgres mastra -d
 cd frontend
-cp .env.example .env.local   # MASTRA_URL=http://localhost:4111
-npm install && npm run dev
+cp .env.example .env.local   # DATABASE_URL=…localhost:5432…, MASTRA_URL=http://localhost:4111
+npm run dev                  # http://localhost:3000
 ```
+
+`npm install` läuft im **Repo-Root**, nicht in `frontend/`. Ein Install in
+`frontend/` legt dort ein eigenes `node_modules` an und hebelt das Hoisting aus,
+auf dem die einzelne `drizzle-orm`-Kopie beruht – das Frontend importiert das
+Drizzle-Schema aus `src/db/schema.ts`, und zwei Kopien der Bibliothek ergeben
+zwei nominell verschiedene Typwelten.
 
 **Mastra-Code ändern:** `npm install && npm run dev` außerhalb von Docker gibt
 Hot-Reload (`mastra dev`). Das Docker-Image ist ein Produktions-Build
@@ -227,8 +270,11 @@ Hot-Reload (`mastra dev`). Das Docker-Image ist ein Produktions-Build
 **Vor jedem Push:**
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm run build       # mastra build --studio
+npm run typecheck   # tsc --noEmit                (Repo-Root)
+npm run build       # mastra build --studio       (Repo-Root)
+
+cd frontend
+npm run typecheck && npm run build && npm run lint
 ```
 
 ## Grenzen und Stellschrauben
@@ -236,13 +282,15 @@ npm run build       # mastra build --studio
 - **Dateitypen:** JPG, PNG, WebP, GIF. PDF ist absichtlich nicht dabei – der
   Workflow würde es als Bildteil an das Modell geben, was die meisten Provider
   ablehnen. Erweitern in `src/mastra/receipts/upload-store.ts`
-  (`ALLOWED_UPLOAD_TYPES`) und `frontend/lib/receipt-uploads.ts`.
+  (`ALLOWED_UPLOAD_TYPES`) und `MIME_BY_EXT` in `server/receipt-routes.ts`.
 - **Maximalgröße:** 15 MB pro Bild, an drei Stellen konsistent gehalten
-  (`upload-store.ts`, `server.bodySizeLimit`, `receipt-uploads.ts`).
-- **Kein Auth.** Studio und Upload-Endpunkt sind offen. Für alles außerhalb von
-  localhost gehört ein Reverse Proxy mit Authentifizierung davor.
-- **Ein Prozess, eine SQLite-Datei.** Für echte Nebenläufigkeit `@mastra/pg`
-  statt `@mastra/libsql`.
+  (`upload-store.ts`, `server.bodySizeLimit`, Teams-Handler).
+- **Kein Auth.** Studio, Upload-Endpunkt und die Weboberfläche sind offen. Für
+  alles außerhalb von localhost gehört ein Reverse Proxy mit Authentifizierung
+  davor.
+- **Kein Objektspeicher.** Die Belegbilder liegen als Dateien im
+  Datenverzeichnis des Agenten, deshalb der Bild-Proxy im Frontend statt eines
+  direkten Links.
 - **Uploads werden nie gelöscht.** `data/uploads/` wächst monoton; ein
   Aufräum-Job wäre der nächste Schritt.
 
@@ -331,13 +379,14 @@ Fachdaten laufen ausschliesslich über Drizzle. `store.db` / `store.pool` werden
 nicht angefasst – die Referenz bezeichnet den Direktzugriff ausdrücklich als
 Umgehung der Storage-Logik für Low-Level-Sonderfälle.
 
-### Was der Web-Pfad davon merkt: nichts
+### Extraktion an genau einer Stelle
 
-Der bestehende `receipt-workflow` heisst jetzt `receipt-extraction-workflow` und
-ist inhaltlich unverändert – er suspendiert nicht und schreibt weiterhin seine
-JSON-Datei. Das Frontend und `extract-receipt-tool.ts` sprechen weiter ihn an.
-Der Review-Workflow ruft ihn als ersten Schritt auf. Extraktionslogik gibt es
-damit weiterhin an genau einer Stelle.
+Der bestehende `receipt-workflow` heisst `receipt-extraction-workflow` und ist
+inhaltlich unverändert – er suspendiert nicht und schreibt weiterhin seine
+JSON-Datei. Der Review-Workflow ruft ihn als ersten Schritt auf,
+`extract-receipt-tool.ts` ruft ihn direkt. Extraktionslogik gibt es damit an
+genau einer Stelle, und sie suspendiert nur dort, wo es einen Kanal für die
+Rückfrage gibt (Teams).
 
 **Messaging-Endpoint für die Azure Bot Registration:**
 
@@ -354,28 +403,35 @@ ist damit Pflicht. Für eine Multi-Tenant-App beides gemeinsam umstellen.
 
 ## Deployment auf Railway
 
-Drei Services pro Environment – zwei davon aus **demselben** Repo, unterschieden
+Vier Services pro Environment – drei davon aus **demselben** Repo, unterschieden
 nur durch ihre Config-Datei:
 
 ```
 Railway-Projekt
 ├── Environment "staging"
-│   ├── Postgres        Datenbank-Service, Backups an
-│   ├── mastra-agent    Repo → railway.json         (Default)
-│   └── mastra-prune    Repo → railway.prune.json   (Settings → Config File)
+│   ├── Postgres          Datenbank-Service, Backups an
+│   ├── mastra-agent      Repo → railway.json            (Default)
+│   ├── mastra-prune      Repo → railway.prune.json      (Settings → Config File)
+│   └── receipt-frontend  Repo → railway.frontend.json   (Settings → Config File)
 └── Environment "production"
-    └── … dieselben drei, eigene Datenbank
+    └── … dieselben vier, eigene Datenbank
 ```
 
-| | `mastra-agent` | `mastra-prune` |
-|---|---|---|
-| Config-Datei | `railway.json` (Default) | `/railway.prune.json` (explizit setzen!) |
-| Start | Server | `scripts/prune.mjs`, terminiert |
-| `preDeployCommand` | Migrationen | – |
-| Health-Check | `/healthz` | – |
-| Cron | – | `0 3 * * *` |
-| Volume | `/app/data` | – |
-| `DATABASE_URL` | `${{ Postgres.DATABASE_URL }}` | dieselbe Referenz |
+| | `mastra-agent` | `mastra-prune` | `receipt-frontend` |
+|---|---|---|---|
+| Config-Datei | `railway.json` (Default) | `/railway.prune.json` (explizit setzen!) | `/railway.frontend.json` (explizit setzen!) |
+| Dockerfile | `Dockerfile` | `Dockerfile` | `frontend/Dockerfile` |
+| Start | Server | `scripts/prune.mjs`, terminiert | Next-Server |
+| Migrationen | ja, im `CMD` | – | **nein** |
+| Health-Check | `/healthz` | – | `/api/healthz` |
+| Cron | – | `0 3 * * *` | – |
+| Volume | `/app/data` | – | – |
+| `DATABASE_URL` | `${{ Postgres.DATABASE_URL }}` | dieselbe Referenz | dieselbe Referenz |
+
+Die explizite Config-Datei ist bei den letzten beiden **nicht optional**: Railway
+liest per Default die `railway.json` im Repo-Root, und Config-as-Code überschreibt
+Dashboard-Einstellungen. Ohne eigene Datei würde das Frontend den Start-Befehl und
+den Health-Check-Pfad des Agenten erben. Mehr dazu unter „3. Prune-Service".
 
 ### 1. Postgres anlegen
 
@@ -510,7 +566,42 @@ pro Beleg entsteht genau eine Zeile in `app.receipts`. Die Policies stehen in
 `scripts/prune.mjs` und sind über `RETENTION_*` justierbar, ohne den Agenten neu
 zu deployen. `app.receipts` hat bewusst keine Retention.
 
-### 4. Staging und Produktion
+### 4. Frontend-Service
+
+Vierter Service aus **demselben Repo**, mit eigener Config-Datei.
+
+1. **New → GitHub Repo**, dasselbe Repo. Service z. B. `receipt-frontend` nennen.
+2. **Settings → Railway Config File:** `/railway.frontend.json`. Der Pfad ist
+   absolut ab Repo-Root. Ohne diesen Eintrag erbt der Service `railway.json` und
+   startet den Agenten.
+3. **Variables:**
+
+   ```
+   DATABASE_URL = ${{ Postgres.DATABASE_URL }}
+   MASTRA_URL   = http://${{ mastra-agent.RAILWAY_PRIVATE_DOMAIN }}:4111
+   FRONTEND_DB_POOL_MAX = 3
+   ```
+
+   `DATABASE_URL` als **Referenz** auf denselben Postgres-Service – keine zweite
+   Datenbank, kein kopierter Connection String. `MASTRA_URL` über Private
+   Networking: gebraucht wird sie nur für die Belegbilder, die als Dateien am
+   Volume des Agenten liegen.
+4. Kein Volume, keine Migration. Health-Check `/api/healthz` (steht in der
+   Config-Datei) – er prüft die Datenbankverbindung mit.
+
+**Zur Erreichbarkeit:** die Oberfläche ist unauthentifiziert und zeigt die
+Belegdaten **aller** Nutzer. In diesem Setup steht sie unter der generierten
+`*.up.railway.app`-Domain – das ist eine bewusste Entscheidung für diese Version
+(kleines, festes Finanzteam) und in `frontend/README.md` begründet. Wer die URL
+hat, sieht die Daten. Die Vorkehrungen dafür, dass Auth später ohne Umbau
+nachrüstbar ist, stehen ebenfalls dort (`lib/receipts/scope.ts`).
+
+**Poolgrösse ernst nehmen:** eine kleine Railway-Postgres-Instanz erlaubt rund 20
+Verbindungen. Agent 8 (`DB_POOL_MAX`) + Frontend 3 (`FRONTEND_DB_POOL_MAX`) +
+Migrations-/Prune-Job lassen Luft; zwei Environments auf **einer** Instanz wären
+schon zu viel – deshalb pro Environment eine eigene Datenbank.
+
+### 5. Staging und Produktion
 
 Zwei Railway-Environments mit je **eigenem** Postgres-Service. Der Ablauf:
 
@@ -524,14 +615,15 @@ beide Environments dieselbe Postgres-Major-Version fahren. Der lokale
 Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
 
 **Reihenfolge beim allerersten Deploy:** zuerst Postgres, dann `mastra-agent`
-(dessen `startCommand` legt beide Schemas an), erst danach `mastra-prune`.
-Der Prune-Job auf einer leeren Datenbank würde sonst über fehlende Tabellen
-stolpern.
+(dessen `startCommand` legt beide Schemas an), erst danach `mastra-prune` und
+`receipt-frontend`. Der Prune-Job auf einer leeren Datenbank würde über fehlende
+Tabellen stolpern, und das Frontend migriert nichts – es erwartet `app.receipts`
+als bereits vorhanden.
 
 **Hinweis zur Haltbarkeit:** Railway markiert Config-as-Code (`railway.json`) als
 deprecated, mit Umstellung auf Infrastructure as Code bis **1. Dezember 2026**.
-Bis dahin funktioniert das Setup wie beschrieben; danach werden beide Dateien in
-das neue Format zu überführen sein.
+Bis dahin funktioniert das Setup wie beschrieben; danach werden alle drei Dateien
+in das neue Format zu überführen sein.
 
 ### Umgebungsvariablen
 
@@ -549,11 +641,20 @@ das neue Format zu überführen sein.
 | `PORT` | nein | setzt Railway selbst; lokal Default 4111 |
 | `MASTRA_HOST` | nein | Default `0.0.0.0` |
 | `RECEIPT_DATA_DIR` | nein | Verzeichnis für die Belegbilder; Default `/app/data` |
-| `FRONTEND_ORIGIN` | nur Variante B | CORS-Origins, Komma-getrennt |
+| `FRONTEND_ORIGIN` | nein | CORS-Origins für direkte Browser-Aufrufe an Mastra; im Normalbetrieb ohne Funktion |
 | `TEST_DATABASE_URL` | nur für Tests | ohne die Variable wird der Suspend/Resume-Test übersprungen |
 | `MASTRA_TELEMETRY_DISABLED` | nein | `1` schaltet anonyme Telemetrie ab |
 
 Dieselbe Liste steht als Vorlage in `.env.example`.
+
+Für den Frontend-Service (`frontend/.env.example`):
+
+| Variable | Pflicht | Zweck |
+|---|---|---|
+| `DATABASE_URL` | **ja** | Dieselbe Instanz. Auf Railway `${{ Postgres.DATABASE_URL }}` |
+| `MASTRA_URL` | für Belegbilder | Adresse des Agent-Service. Auf Railway `http://${{ mastra-agent.RAILWAY_PRIVATE_DOMAIN }}:4111` |
+| `FRONTEND_DB_POOL_MAX` | nein | Poolgrösse des Frontends, Default 3 |
+| `PORT` | nein | setzt Railway selbst; lokal 3000 |
 
 ### Vor dem Livegang beachten
 
@@ -565,3 +666,8 @@ Dieselbe Liste steht als Vorlage in `.env.example`.
 - **Der Upload-Endpunkt ist offen** (`POST /receipts/upload`).
 - **Die Belegbilder liegen im Dateisystem**, nicht in Postgres. Ein Redeploy ohne
   Volume verliert sie.
+- **Die Weboberfläche ist unauthentifiziert** und zeigt die Belegdaten aller
+  Nutzer – die Mandantentrennung des Teams-Bots gilt dort ausdrücklich nicht. Für
+  diese Version akzeptiert (siehe „4. Frontend-Service" und
+  `frontend/README.md`). Wenn der Nutzerkreis wächst, ist das die erste Baustelle;
+  `frontend/lib/receipts/scope.ts` ist die dafür vorgesehene Stelle.

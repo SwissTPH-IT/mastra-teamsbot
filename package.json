@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "frontend"
+  ],
+  "exports": {
+    "./db/schema": "./src/db/schema.ts"
+  },
   "scripts": {
     "dev": "mastra dev",
     "build": "mastra build --studio",
