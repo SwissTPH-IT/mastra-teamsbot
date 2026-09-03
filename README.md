@@ -399,9 +399,31 @@ dort:
 
 | Feld | Wert | Warum |
 |---|---|---|
-| `preDeployCommand` | `node .mastra/output/scripts/migrate.mjs` | Migrationen laufen nach dem Build und **vor** dem Umschalten auf die neue Version – nicht beim ersten Request |
-| `startCommand` | `node .mastra/output/index.mjs` | |
+| `startCommand` | `node .mastra/output/scripts/migrate.mjs && node .mastra/output/index.mjs` | Migration **und** Start in einem Befehl – siehe unten |
 | `healthcheckPath` | `/healthz` | prüft zusätzlich die Datenbankverbindung. **Nicht** `/health` – der Pfad ist von Mastra belegt und liefert `{"success":true}` ohne DB-Prüfung |
+
+#### Warum die Migration im `startCommand` steht und nicht im `preDeployCommand`
+
+Railways `preDeployCommand` ist der lehrbuchmässige Ort dafür. In diesem Projekt hat
+er sich als unzuverlässig erwiesen: konfiguriert, aber im Deploy nicht ausgeführt.
+Der Agent startete gegen eine leere Datenbank und crashte in einer Endlosschleife
+mit `relation "mastra.mastra_schedules" does not exist` – Mastra liest beim Boot
+`mastra_schedules` und `mastra_workflow_definitions` und bricht ab, wenn sie fehlen.
+
+Das Tückische daran: laut Railway-Doku stoppt ein **fehlgeschlagener** Pre-Deploy den
+Deploy („the deployment will not proceed"). Ein **übersprungener** stoppt nichts – der
+Fehler taucht erst im Runtime-Log des crashenden Containers auf, nicht als
+Deploy-Fehler.
+
+Im `startCommand` ist die Reihenfolge dagegen erzwungen: `&&` startet den Server nur,
+wenn die Migration mit Exit-Code 0 durchgelaufen ist. Sie läuft dadurch bei jedem
+Container-Start erneut – das ist unkritisch, weil beide Teile idempotent sind
+(Drizzle führt nur neue Migrationen aus, `storage.init()` legt nur fehlende Tabellen
+an) und zusammen rund eine Sekunde brauchen. Nebeneffekt: es ist derselbe Befehl wie
+in `docker-compose.yml`, lokal und auf Railway läuft also dasselbe.
+
+Der `healthcheckTimeout` steht auf 180 Sekunden, damit die Migration beim allerersten
+Deploy (43 Tabellen plus Indizes) nicht in den Health-Check läuft.
 
 Der Agent selbst migriert nichts: `PostgresStore` läuft mit `disableInit: true`
 (`src/mastra/storage.ts`). Das ist das in der
@@ -419,8 +441,8 @@ Zweiter Service aus **demselben Repo** – gleiches Image, anderer Start-Befehl.
 > **Der Punkt, an dem es sonst schiefgeht:** Railway liest per Default die
 > `railway.json` im Repo-Root, und laut Doku gilt *„Configuration defined in code
 > will always override values from the dashboard."* Ein zweiter Service aus
-> demselben Repo würde also `startCommand`, `preDeployCommand` und
-> `healthcheckPath` des Agenten erben – und ein im Dashboard gesetzter
+> demselben Repo würde also `startCommand` und `healthcheckPath` des Agenten
+> erben – und ein im Dashboard gesetzter
 > Start-Befehl würde daran **nichts** ändern. Der Cron-Job startete dann den
 > Server statt des Prune-Skripts, liefe nie zu Ende, und weil Railway einen
 > neuen Lauf überspringt, solange der vorherige noch läuft, liefe er genau
@@ -438,8 +460,8 @@ Deshalb hat dieser Service eine eigene Config-Datei, `railway.prune.json`:
 }
 ```
 
-Kein `preDeployCommand` (Migrationen gehören zum Agent-Deploy, nicht zu jedem
-Cron-Lauf), kein `healthcheckPath` (der Job hört auf keinem Port), und
+Keine Migration im Start-Befehl (die gehört zum Agent-Deploy, nicht zu jedem
+nächtlichen Lauf), kein `healthcheckPath` (der Job hört auf keinem Port), und
 `restartPolicyType: NEVER` – ein Cron-Job soll terminieren, nicht neu starten.
 `scripts/prune.mjs` schliesst seinen Pool im `finally`, beendet sich also sauber,
 wie Railway es für Cron-Services verlangt.
@@ -478,7 +500,7 @@ beide Environments dieselbe Postgres-Major-Version fahren. Der lokale
 Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
 
 **Reihenfolge beim allerersten Deploy:** zuerst Postgres, dann `mastra-agent`
-(dessen `preDeployCommand` legt beide Schemas an), erst danach `mastra-prune`.
+(dessen `startCommand` legt beide Schemas an), erst danach `mastra-prune`.
 Der Prune-Job auf einer leeren Datenbank würde sonst über fehlende Tabellen
 stolpern.
 
