@@ -3,22 +3,27 @@
 //
 // Zwei Fälle:
 //
-//   Nachricht MIT Bild    -> Beleg ablegen, Review-Run starten, Vorlage posten.
+//   Nachricht MIT Bild    -> Beleg ablegen, Review-Run starten, Karte posten.
 //                            Der Run bleibt suspendiert im Store liegen.
 //   Nachricht OHNE Bild   -> gibt es für diesen Thread einen offenen Review,
 //                            ist die Nachricht die Antwort darauf. Sonst
 //                            übernimmt der Standard-Handler (Agent + DB-Tools).
+//
+// Die Vorlage ist eine Adaptive Card mit Bestätigen / Anpassen / Abbrechen.
+// Ein Klick darauf kommt NICHT hier an – Teams schickt ihn als Action.Submit,
+// den der Adapter an `chat.onAction` gibt (siehe receipt-card-handlers.ts).
+// Der Textweg hier bleibt daneben bestehen, für alle, die lieber tippen.
 //
 // Die Zuordnung Thread -> runId steht in app.pending_reviews, damit sie einen
 // Prozess-Neustart und ein Railway-Deploy überlebt. Der Kandidatensatz steht
 // dort NICHT – der liegt im Workflow-Snapshot, wo Mastra ihn verwaltet.
 
 import type { ChannelHandler } from '@mastra/core/channels';
-import { createWorkflowStateReader } from '@mastra/core/workflows';
 import { createHash } from 'node:crypto';
 import { model } from '../model';
 import { USER_ID_KEY } from '../tools/tool-context';
-import { MAX_CORRECTION_ROUNDS, initialReviewState } from '../workflows/receipt-review-workflow';
+import { initialReviewState } from '../workflows/receipt-review-workflow';
+import { reportOutcome, resumeReview, type ReviewResume } from './receipt-review-session';
 import {
   closePendingReview,
   getPendingReview,
@@ -115,11 +120,6 @@ function annotateModelError(reason: string): string {
   return `${reason} (konfiguriertes Modell: "${model}" – MASTRA_MODEL muss auf ein vision-fähiges Modell zeigen)`;
 }
 
-type ReviewResume =
-  | { kind: 'confirm' }
-  | { kind: 'correct'; text: string }
-  | { kind: 'cancel' };
-
 /**
  * Antwort des Nutzers auf eine Vorlage einordnen.
  *
@@ -159,94 +159,6 @@ export function classifyReply(text: string): ReviewResume {
   }
 
   return { kind: 'correct', text };
-}
-
-/** Die Vorlage, wie sie im Thread erscheint. */
-function presentation(payload: {
-  summary: string;
-  round: number;
-  isRecheck: boolean;
-}): string {
-  const header = payload.isRecheck
-    ? `**Korrigiert – bitte nochmal prüfen** (Runde ${payload.round} von ${MAX_CORRECTION_ROUNDS})`
-    : '**Beleg gelesen – bitte prüfen**';
-
-  return (
-    `${header}\n\n${payload.summary}\n\n` +
-    'Antworte mit **"passt"** zum Speichern, mit einer Korrektur ' +
-    '(z. B. „das Datum ist der 3., nicht der 8."), oder mit **"abbrechen"**.'
-  );
-}
-
-type SuspendPayload = { summary: string; round: number; isRecheck: boolean };
-
-/** Der Step im receipt-review-workflow, der suspendiert. */
-const REVIEW_STEP_ID = 'review-candidate';
-
-/**
- * Die Suspend-Payload des Review-Schritts aus dem Run-Ergebnis lösen.
- *
- * `result.suspendPayload` ist NICHT die Payload selbst, sondern eine Map
- * stepId -> Payload (Execution Engine: `base.suspendPayload[stepId] = rest`).
- * Der direkte Zugriff auf `.summary` ergab deshalb undefined – und genau das
- * stand dann anstelle der Vorlage im Thread.
- */
-function readSuspendPayload(result: {
-  suspendPayload?: unknown;
-  steps?: Record<string, unknown>;
-}): SuspendPayload | undefined {
-  const candidates = [
-    (result.suspendPayload as Record<string, unknown> | undefined)?.[REVIEW_STEP_ID],
-    // Dieselbe Payload hängt auch am Step-Ergebnis – als Absicherung, falls die
-    // Engine die Map-Form einmal anders aufbaut.
-    (result.steps?.[REVIEW_STEP_ID] as { suspendPayload?: unknown } | undefined)?.suspendPayload,
-  ];
-
-  for (const entry of candidates) {
-    const payload = entry as SuspendPayload | undefined;
-    if (payload && typeof payload.summary === 'string' && payload.summary.length > 0) return payload;
-  }
-  return undefined;
-}
-
-/**
- * Ergebnis eines start()/resume() in eine Thread-Nachricht übersetzen und den
- * pending_review entsprechend offen halten oder schliessen.
- */
-async function reportOutcome(
-  thread: { id: string; post: (message: string) => Promise<unknown> },
-  result: {
-    status: string;
-    suspendPayload?: unknown;
-    steps?: Record<string, unknown>;
-    result?: { message?: string; status?: string };
-  },
-): Promise<void> {
-  if (result.status === 'suspended') {
-    const payload = readSuspendPayload(result);
-    // Ohne Vorlage darf der Review nicht offen bleiben: ein "passt" würde sonst
-    // einen Datensatz bestätigen, den der Nutzer nie gesehen hat.
-    if (!payload) {
-      await closePendingReview(thread.id);
-      await thread.post(
-        '❌ Der Beleg wurde gelesen, aber die Vorlage zum Prüfen konnte nicht aufgebaut werden. ' +
-          'Bitte den Beleg noch einmal schicken.',
-      );
-      return;
-    }
-    await thread.post(presentation(payload));
-    return;
-  }
-
-  await closePendingReview(thread.id);
-
-  if (result.status === 'success') {
-    const outcome = result.result;
-    await thread.post(outcome?.status === 'saved' ? `✅ ${outcome.message}` : `ℹ️ ${outcome?.message}`);
-    return;
-  }
-
-  await thread.post(`❌ Der Beleg konnte nicht verarbeitet werden (Status "${result.status}").`);
 }
 
 /**
@@ -300,39 +212,14 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
       return;
     }
 
-    const resumeData = classifyReply(message.text);
-
-    try {
-      // Der in der Doku beschriebene Weg, einen Run aus dem Store fortzusetzen:
-      // Zustand lesen, suspendierten Schritt bestimmen, Run über dieselbe runId
-      // neu aufbauen, resumen. Funktioniert genau deshalb auch nach einem
-      // Prozess-Neustart – der Zustand liegt im Snapshot, nicht im Speicher.
-      // https://mastra.ai/docs/workflows/suspend-and-resume
-      const state = await workflow.getWorkflowRunById(pending.runId);
-      if (!state || state.status !== 'suspended') {
-        await closePendingReview(thread.id);
-        await thread.post(
-          'Zu diesem Thread ist kein offener Beleg mehr vorhanden. Schick den Beleg bitte noch einmal.',
-        );
-        return;
-      }
-
-      const suspendedStep = createWorkflowStateReader(state).getSuspendedStep();
-      const run = await workflow.createRun({ runId: pending.runId });
-
-      await thread.startTyping('Einen Moment…');
-      const result = await run.resume({
-        step: suspendedStep?.path,
-        resumeData,
-        requestContext: ctx.requestContext,
-      });
-
-      await reportOutcome(thread, result);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger?.error(`[teams] Resume für Run ${pending.runId} fehlgeschlagen: ${errorMessage}`);
-      await thread.post(`❌ Die Antwort konnte nicht verarbeitet werden: ${errorMessage}`);
-    }
+    // Der Textweg neben der Karte: "passt", eine Korrektur oder "abbrechen".
+    await resumeReview({
+      mastra,
+      thread,
+      pending,
+      resumeData: classifyReply(message.text),
+      requestContext: ctx.requestContext,
+    });
     return;
   }
 
@@ -413,7 +300,7 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
       return;
     }
 
-    await reportOutcome(thread, result);
+    await reportOutcome(thread, run.runId, result);
   } catch (error) {
     await closePendingReview(thread.id);
     const errorMessage = error instanceof Error ? error.message : String(error);

@@ -57,9 +57,10 @@ Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
            └─ handleTeamsReceipt ─► receipt-review-workflow
                                       ├─ receipt-extraction-workflow (nested)
                                       │    load → extract → write-json
-                                      ├─ review-candidate ─► suspend ─► Vorlage im Thread
+                                      ├─ review-candidate ─► suspend ─► Adaptive Card im Thread
                                       │      ▲                              │
                                       │      └──── run.resume() ◄───────────┘
+                                      │        (Button/Dialog über chat.onAction, oder Text)
                                       └─ persist-receipt ─► app.receipts
 
 Browser ─► /belege, /api/export ─► app.receipts   (read-only, Drizzle, server-side)
@@ -87,6 +88,7 @@ Key pieces (`src/mastra/`):
 - `agents/receipt-agent.ts` — vision agent + `receiptSchema` (the source of truth for the receipt shape; every field is a string, with `NOT_PRESENT` / `ILLEGIBLE` markers instead of blanks).
 - `agents/receipt-chat-agent.ts` + `tools/extract-receipt-tool.ts` — the former web chat path; the tool resolves `uploadId`s to paths and runs the workflow sequentially. No caller today (see Notes).
 - `agents/teams-agent.ts` + `channels/teams-receipt-handler.ts` — the Teams path. Message *with* image → start a review run. Message *without* → if `app.pending_reviews` has a row for this thread, it's the answer to a pending presentation (`classifyReply` → `run.resume()`); otherwise `defaultHandler` (the model, with the DB tools).
+- `channels/receipt-review-card.ts` + `channels/receipt-card-handlers.ts` + `channels/receipt-review-session.ts` — the presentation is an **Adaptive Card** (Bestätigen / Anpassen / Abbrechen). A card click is not a message in Teams: the adapter sees `value.actionId` and routes it to `chat.processAction`, so the message handlers never see it. Own handlers therefore hang off `agent.getChannels().sdk` (`onAction` / `onModalSubmit`), registered once at startup in `index.ts` — not on the first receipt, or a card posted before a deploy would be dead after it. Mastra registers its own catch-all `onAction` for tool approvals and ignores foreign ids; handlers are additive, hence the `receipt-review:` prefix, with the runId in the action id so a stale card cannot confirm a newer receipt. `receipt-review-session.ts` is the shared middle of both paths (resume + report): whether a booking is written must not depend on clicking versus typing. A card cannot carry inputs (`CardChild` has none) — so "Anpassen" is a button with `actionType: 'modal'` (→ `msteams: task/fetch`) opening a Teams dialog for exactly the four confirmable fields: date, currency, tax, total. Dialog input goes through `applyReviewEdits()` in `receipts/candidate.ts` — the same parsers as extraction; empty means null, unreadable re-opens the dialog with the message instead of silently storing null. The dialog submit *is* the confirmation (`resumeData.kind === 'edit'`). Free text in the thread still works and re-presents the card.
 - `tools/receipt-db-tools.ts` + `tools/tool-context.ts` — four narrow tools, no generic SQL.
 - `receipts/upload-store.ts` — allowed types (JPG/PNG/WebP/GIF only), `MAX_UPLOAD_BYTES` (15 MB), and `UPLOAD_ID_PATTERN`. The strict `<uuid><ext>` pattern *is* the path-traversal defense — don't loosen it.
 - `storage.ts` / `model.ts` — single points for `PostgresStore` (schema `mastra`, `disableInit: true`) and the `MASTRA_MODEL` choice.

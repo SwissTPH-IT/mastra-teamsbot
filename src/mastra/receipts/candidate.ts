@@ -256,3 +256,70 @@ export function formatCandidate(candidate: ReceiptCandidate): string {
 
   return rows.join('\n');
 }
+
+/* ---------- Die vier Felder, die in der Adaptive Card bestätigt werden ---------- */
+
+/**
+ * Die Felder, die der Nutzer in der Karte gegenlesen und im Dialog korrigieren
+ * kann. Bewusst genau diese vier: sie entscheiden über die Buchung. Händler und
+ * Positionen sind für die Buchhaltung Beiwerk und bleiben dem Freitext-Weg
+ * (receipt-correction-agent) überlassen.
+ */
+export const REVIEW_FIELDS = ['receiptDate', 'currency', 'vatAmount', 'totalAmount'] as const;
+
+export type ReviewField = (typeof REVIEW_FIELDS)[number];
+
+/** Rohwerte aus den Eingabefeldern des Dialogs, unbearbeitet wie Teams sie liefert. */
+export type ReviewEdits = Partial<Record<ReviewField, string>>;
+
+export type ReviewEditResult = {
+  candidate: ReceiptCandidate;
+  /** Feld -> Meldung, für die Felder, deren Eingabe nicht lesbar war. */
+  errors: Partial<Record<ReviewField, string>>;
+};
+
+/**
+ * Dialog-Eingaben auf den Kandidatensatz anwenden.
+ *
+ * Deterministisch, ohne Modell: was der Nutzer selbst eintippt, soll nicht noch
+ * einmal interpretiert werden. Es gelten dieselben Parser wie für die
+ * Extraktion, damit "42,10", "1'234.50" und "CHF 42.10" auch hier durchgehen.
+ *
+ * Ein leeres Feld heisst "kein Wert" und setzt null – das ist der einzige Weg,
+ * einen falsch gelesenen Betrag wieder loszuwerden. Ein befülltes, aber nicht
+ * lesbares Feld ist dagegen ein Fehler: es stillschweigend zu null zu machen
+ * wäre genau der Datenverlust, den die Kontrollschleife verhindern soll.
+ */
+export function applyReviewEdits(candidate: ReceiptCandidate, edits: ReviewEdits): ReviewEditResult {
+  const errors: Partial<Record<ReviewField, string>> = {};
+  const next = { ...candidate };
+
+  const apply = (
+    field: ReviewField,
+    parse: (raw: string) => string | null,
+    hint: string,
+  ) => {
+    const raw = edits[field];
+    if (raw === undefined) return;
+
+    const trimmed = raw.trim();
+    if (trimmed === '') {
+      next[field] = null;
+      return;
+    }
+
+    const parsed = parse(trimmed);
+    if (parsed === null) {
+      errors[field] = hint;
+      return;
+    }
+    next[field] = parsed;
+  };
+
+  apply('receiptDate', raw => parseDate(raw), 'Datum nicht lesbar – erwartet wird z. B. 2026-03-14.');
+  apply('currency', raw => parseCurrency(raw), 'Währung unbekannt – erwartet wird CHF, EUR, USD oder GBP.');
+  apply('vatAmount', raw => parseAmount(raw), 'Steuerbetrag nicht lesbar – erwartet wird z. B. 3.20.');
+  apply('totalAmount', raw => parseAmount(raw), 'Betrag nicht lesbar – erwartet wird z. B. 42.10.');
+
+  return { candidate: next, errors };
+}

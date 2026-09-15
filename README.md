@@ -12,7 +12,7 @@ Drei Container, ein `docker compose up`:
 
 | | Wer | Was | Mandantentrennung |
 |---|---|---|---|
-| **Microsoft Teams** | Endnutzer | Beleg einreichen, Vorschlag bestätigen oder korrigieren | hart verdrahtet: jeder sieht nur seine eigenen Belege |
+| **Microsoft Teams** | Endnutzer | Beleg einreichen, Vorschlag per Karte bestätigen oder anpassen | hart verdrahtet: jeder sieht nur seine eigenen Belege |
 | **Weboberfläche** | Finanzteam | die erfassten Daten ansehen, durchsuchen, als CSV exportieren | bewusst keine: übergreifende Ansicht, der Nutzer ist Datenfeld, nicht Berechtigungsgrenze |
 
 Erfasst wird ausschliesslich über Teams. Die Weboberfläche ist **read-only** und
@@ -68,9 +68,10 @@ Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
                                       │    ├─ load-receipt      Datei → Data-URL
                                       │    ├─ extract-receipt   Vision-Agent → receiptSchema
                                       │    └─ write-receipt-json data/receipts/<id>.json
-                                      ├─ review-candidate ─► suspend ─► Vorlage im Thread
+                                      ├─ review-candidate ─► suspend ─► Adaptive Card im Thread
                                       │      ▲                              │
                                       │      └──── run.resume() ◄───────────┘
+                                      │             (Button, Dialog oder Text)
                                       └─ persist-receipt    → app.receipts
 
 Browser ─► /belege ──────────► app.receipts (lesend, Drizzle, serverseitig)
@@ -103,7 +104,10 @@ Migrationen bleiben hier.
 | `agents/receipt-correction-agent.ts` | Wendet eine Freitext-Korrektur auf einen Kandidatensatz an |
 | `agents/assistant-agent.ts` | Beispiel-Agent aus dem Ausgangs-Stack (Wetter-Tool, Working Memory) |
 | `agents/teams-agent.ts` | Der Microsoft-Teams-Bot: Adapter, Handler-Registrierung, DB-Tools, Instructions |
-| `channels/teams-receipt-handler.ts` | Teams-Anhang → Review-Workflow; und die Antwort des Nutzers → `run.resume()` |
+| `channels/teams-receipt-handler.ts` | Teams-Anhang → Review-Workflow; und die getippte Antwort des Nutzers → `run.resume()` |
+| `channels/receipt-review-card.ts` | Die Adaptive Card (Datum, Währung, Steuer, Total) und der Anpassen-Dialog |
+| `channels/receipt-card-handlers.ts` | `chat.onAction` / `chat.onModalSubmit`: Klick auf die Karte → `run.resume()` |
+| `channels/receipt-review-session.ts` | Die gemeinsame Mitte beider Wege: Run fortsetzen, Ergebnis im Thread berichten |
 | `model.ts` | Eine Stelle für die Modellwahl (`MASTRA_MODEL`) |
 | `workflows/receipt-extraction-workflow.ts` | Laden → Extrahieren → JSON schreiben. Unverändert, vom Web-Pfad benutzt |
 | `workflows/receipt-review-workflow.ts` | Extraktion → Vorlage → (Korrektur → erneute Vorlage)\* → DB-Write |
@@ -312,9 +316,17 @@ Teams-Nachricht MIT Bildanhang
               ├─ app.pending_reviews      Zeiger Thread → runId (vor dem Start!)
               └─ run.start()
                     └─ receipt-extraction-workflow   (unverändert)
-                    └─ review-candidate  ──► suspend ──► Vorlage im Thread
-                                                          "Migros · 2026-03-14 · CHF 42.10
-                                                           passt? / Korrektur? / abbrechen?"
+                    └─ review-candidate  ──► suspend ──► Adaptive Card im Thread
+                                                          Händler · Datum · Währung
+                                                          Steuer · Total
+                                                          [Bestätigen] [Anpassen] [Abbrechen]
+
+Klick auf die Karte (Action.Submit, KEINE Nachricht)
+  └─► chat.onAction  (channels/receipt-card-handlers.ts)
+        ├─ "Bestätigen" → run.resume({ kind: 'confirm' }) → app.receipts  ✅
+        ├─ "Anpassen"   → task/fetch → Dialog mit den vier Feldern
+        │                   └─ Submit → applyReviewEdits() → resume({ kind: 'edit' }) ✅
+        └─ "Abbrechen"  → run.resume({ kind: 'cancel' })   → nichts gespeichert
 
 Teams-Nachricht OHNE Bildanhang
   └─► handleTeamsReceipt
@@ -325,6 +337,31 @@ Teams-Nachricht OHNE Bildanhang
         │           └─ "abbrechen"  → nichts gespeichert
         └─ nein → Standard-Handler: der Agent antwortet, mit den DB-Tools
 ```
+
+### Warum die Karte an `chat.onAction` hängt und nicht am Channel-Handler
+
+Ein Klick auf eine Adaptive Card ist in Teams keine Nachricht. Der Adapter
+erkennt am `value.actionId` des Action.Submit, dass es eine Aktion ist, und gibt
+sie an `chat.processAction` – die Message-Handler (`onMention`,
+`onDirectMessage`, `onSubscribedMessage`) sehen sie nie. Eigene Handler kommen
+deshalb über `agent.getChannels().sdk` dazu; Mastras eigener `onAction`-Handler
+für Tool-Freigaben bleibt daneben bestehen, Handler sind additiv. Registriert
+wird beim Start (`src/mastra/index.ts`) und nicht beim ersten Beleg: eine Karte,
+die vor einem Deploy gepostet wurde, muss danach noch reagieren.
+
+Die vier Felder auf der Karte – **Datum, Währung, Steuer, Total** – sind die,
+die über die Buchung entscheiden. Eingabefelder direkt in der Karte gehen nicht
+(der `CardChild`-Typ des Chat SDK kennt nur Text, Felder, Tabellen und Buttons),
+deshalb öffnet „Anpassen" einen Teams-Dialog mit `Input.Date`, einer
+Währungsauswahl und zwei Textfeldern. Der Dialog-Submit ist gleichzeitig die
+Bestätigung: die Werte hat der Nutzer selbst eingetippt. Sie laufen trotzdem
+durch dieselben Parser wie die Extraktion (`applyReviewEdits` in
+`receipts/candidate.ts`) – ein leeres Feld heisst „kein Wert", ein unlesbares
+Feld zeigt den Dialog erneut mit der Meldung, statt still `null` zu speichern.
+
+Alles andere (Händler, Positionen, Kategorie) bleibt dem Textweg überlassen: eine
+Antwort im Thread wird weiterhin als „passt", Korrektur oder „abbrechen"
+eingeordnet und legt die Karte danach erneut vor.
 
 ### Warum nach einer Korrektur nochmal nachgefragt wird
 
@@ -566,8 +603,9 @@ Das ZIP in Teams hochladen (*Apps → Manage your apps → Upload an app*).
 gut:
 
 1. In Teams ein Belegfoto an den Bot senden.
-2. Der Bot legt die gelesenen Werte vor.
-3. „passt" antworten.
+2. Der Bot legt die gelesenen Werte als Karte vor (Datum, Währung, Steuer, Total).
+3. „Bestätigen & speichern" klicken – oder „Anpassen", im Dialog ein Feld ändern
+   und übernehmen.
 4. Im Frontend unter `/belege` erscheint die Zeile – mit dem Belegdatum, dem
    Betrag in `de-CH` und dem Erfassungszeitpunkt in `Europe/Zurich`.
 5. Detailseite öffnen: das Belegbild wird über den Proxy geladen (beweist, dass

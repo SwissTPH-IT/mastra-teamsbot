@@ -153,6 +153,12 @@ const reviewCandidate = createStep({
     z.object({ kind: z.literal('confirm') }),
     z.object({ kind: z.literal('correct'), text: z.string().min(1) }),
     z.object({ kind: z.literal('cancel') }),
+    // Der Weg über die Adaptive Card: der Nutzer hat die vier Pflichtfelder im
+    // Dialog selbst gesetzt. Der Kandidat kommt hier fertig geparst an – die
+    // Eingaben laufen in der Kanalschicht durch dieselben Parser wie die
+    // Extraktion (applyReviewEdits), damit unlesbare Eingaben schon im Dialog
+    // auffallen und nicht erst als stiller Null-Wert in der Datenbank.
+    z.object({ kind: z.literal('edit'), candidate: candidateSchema }),
   ]),
   execute: async ({ inputData, state, setState, resumeData, suspend, mastra }) => {
     const candidate = state.candidate;
@@ -179,6 +185,14 @@ const reviewCandidate = createStep({
     }
 
     if (resumeData.kind === 'confirm') {
+      return { decision: 'confirmed' as const, ...inputData };
+    }
+
+    // Anpassen im Dialog ist gleichzeitig die Bestätigung: der Nutzer hat die
+    // Werte selbst eingetippt und mit "Übernehmen & speichern" abgeschickt.
+    // Eine weitere Vorlage würde ihm nur seine eigene Eingabe vorlegen.
+    if (resumeData.kind === 'edit') {
+      await setState({ ...state, candidate: resumeData.candidate });
       return { decision: 'confirmed' as const, ...inputData };
     }
 

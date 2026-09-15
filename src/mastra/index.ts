@@ -8,6 +8,7 @@ import { teamsAgent } from './agents/teams-agent';
 import { receiptCorrectionAgent } from './agents/receipt-correction-agent';
 import { receiptExtractionWorkflow } from './workflows/receipt-extraction-workflow';
 import { receiptReviewWorkflow } from './workflows/receipt-review-workflow';
+import { registerReceiptCardHandlers } from './channels/receipt-card-handlers';
 import { receiptRoutes } from './server/receipt-routes';
 import { healthRoute } from './server/health-route';
 import { MAX_UPLOAD_BYTES } from './receipts/upload-store';
@@ -70,3 +71,9 @@ export const mastra = new Mastra({
     },
   },
 });
+
+// Die Buttons der Beleg-Karte hängen an der Chat-Instanz des Teams-Agenten,
+// nicht an einem Message-Handler: ein Klick auf eine Adaptive Card ist in Teams
+// keine Nachricht, sondern eine Action (siehe channels/receipt-card-handlers.ts).
+// Muss nach `new Mastra(...)` passieren – vorher gibt es die Chat-Instanz nicht.
+registerReceiptCardHandlers(mastra);
