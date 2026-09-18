@@ -10,9 +10,12 @@
 //     bei Komma-getrennten Dateien landet die ganze Zeile in einer Spalte.
 //
 // Zeilenende ist CRLF (RFC 4180 und das, was Excel erwartet).
+//
+// Spaltenkoepfe sind englisch wie die uebrige Oberflaeche, ohne Umlaute - der
+// Dateiname und die Kopfzeile wandern in Excel und in Dateinamen weiter.
 
-import type { ReceiptRow } from "../receipts/queries";
-import { formatReceiptDate } from "../receipts/format";
+import type { ApiReceipt } from "../api/receipts";
+import { formatReceiptDate, formatTimestamp } from "../receipts/format";
 
 /** Erlaubte Trennzeichen. Frei waehlbarer Text wuerde die Datei zerschiessen. */
 export const CSV_DELIMITERS = { semicolon: ";", comma: ",", tab: "\t" } as const;
@@ -35,59 +38,47 @@ export function csvOptionsFor(delimiter: string): CsvOptions {
 const BOM = "﻿";
 const EOL = "\r\n";
 
-const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("de-CH", {
-  timeZone: "Europe/Zurich",
-  day: "2-digit",
-  month: "2-digit",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-});
-
 type Column = {
   header: string;
-  value: (row: ReceiptRow, options: CsvOptions) => string | null;
+  value: (row: ApiReceipt, options: CsvOptions) => string | null;
 };
 
 /**
  * Die Spalten des Exports.
  *
- * Bewusst nicht `line_items` und nicht `raw_extraction`: verschachteltes JSON
- * in einer CSV-Zelle ist in Excel unbenutzbar. `file_hash` gehoert in kein
- * Buchhaltungsdokument. Alles andere aus app.receipts ist drin - der Export ist
- * die Stelle, an der man mehr Felder erwartet als in der Tabelle.
+ * Bewusst nicht die Positionen und nicht der Rohausgabe-Block: verschachteltes
+ * JSON in einer CSV-Zelle ist in Excel unbenutzbar - und der Dienst gibt
+ * beides ohnehin nicht heraus. Eine Nutzerspalte gibt es nicht mehr: der
+ * Export enthaelt ausschliesslich die eigenen Belege, eine Spalte mit immer
+ * demselben Wert waere Ballast.
  */
 const COLUMNS: Column[] = [
-  { header: "Beleg-ID", value: (row) => row.id },
-  { header: "Nutzer", value: (row) => row.userId },
-  { header: "Belegdatum", value: (row) => formatReceiptDate(row.receiptDate) },
-  { header: "Belegzeit", value: (row) => row.receiptTime },
-  { header: "Haendler", value: (row) => row.merchant },
-  { header: "Haendler-Adresse", value: (row) => row.merchantAddress },
-  { header: "Haendler-Steuernummer", value: (row) => row.merchantTaxId },
-  { header: "Referenznummer", value: (row) => row.referenceNumber },
-  { header: "Kategorie", value: (row) => row.category },
-  { header: "Belegart", value: (row) => row.receiptType },
-  { header: "Zahlungsart", value: (row) => row.paymentMethod },
-  { header: "Zwischensumme", value: (row, o) => decimal(row.subtotalAmount, o) },
-  { header: "Rabatt", value: (row, o) => decimal(row.discountAmount, o) },
-  { header: "MwSt-Betrag", value: (row, o) => decimal(row.vatAmount, o) },
-  { header: "MwSt-Satz", value: (row, o) => decimal(row.vatRate, o) },
-  { header: "Gesamtbetrag", value: (row, o) => decimal(row.totalAmount, o) },
-  { header: "Waehrung", value: (row) => row.currency },
-  { header: "Konfidenz", value: (row, o) => decimal(row.confidence, o) },
-  {
-    header: "Erfasst am",
-    value: (row) => (row.createdAt ? TIMESTAMP_FORMATTER.format(row.createdAt) : null),
-  },
-  { header: "Dateireferenz", value: (row) => row.fileReference },
+  { header: "Receipt ID", value: (row) => row.id },
+  { header: "Receipt date", value: (row) => formatReceiptDate(row.receiptDate) },
+  { header: "Receipt time", value: (row) => row.receiptTime },
+  { header: "Merchant", value: (row) => row.merchant },
+  { header: "Merchant address", value: (row) => row.merchantAddress },
+  { header: "Merchant tax id", value: (row) => row.merchantTaxId },
+  { header: "Reference number", value: (row) => row.referenceNumber },
+  { header: "Category", value: (row) => row.category },
+  { header: "Receipt type", value: (row) => row.receiptType },
+  { header: "Payment method", value: (row) => row.paymentMethod },
+  { header: "Subtotal", value: (row, o) => decimal(row.subtotalAmount, o) },
+  { header: "Discount", value: (row, o) => decimal(row.discountAmount, o) },
+  { header: "VAT amount", value: (row, o) => decimal(row.vatAmount, o) },
+  { header: "VAT rate", value: (row, o) => decimal(row.vatRate, o) },
+  { header: "Total", value: (row, o) => decimal(row.totalAmount, o) },
+  { header: "Currency", value: (row) => row.currency },
+  { header: "Confidence", value: (row, o) => decimal(row.confidence, o) },
+  { header: "Issues", value: (row) => (row.issues.length > 0 ? row.issues.join("; ") : null) },
+  { header: "Captured at", value: (row) => formatTimestamp(row.createdAt) },
+  { header: "File reference", value: (row) => row.fileReference },
 ];
 
 /**
  * numeric-Wert fuer die Zelle.
  *
- * Der Wert kommt als String aus Postgres und wird als String weitergegeben -
+ * Der Wert kommt als String aus dem Dienst und wird als String weitergegeben -
  * nur der Dezimalpunkt wird getauscht. Ein Umweg ueber Number wuerde bei
  * Betraegen Rundungsfehler einbauen, die hinterher nicht mehr zu erkennen sind.
  */
@@ -121,7 +112,7 @@ export function csvHeaderLine(options: CsvOptions): string {
   );
 }
 
-export function csvRowLine(row: ReceiptRow, options: CsvOptions): string {
+export function csvRowLine(row: ApiReceipt, options: CsvOptions): string {
   return toLine(
     COLUMNS.map((column) => column.value(row, options)),
     options.delimiter,

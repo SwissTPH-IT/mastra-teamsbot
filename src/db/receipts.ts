@@ -5,7 +5,7 @@
 // an jedes WHERE. Es gibt bewusst keine Variante ohne – der Typ erzwingt sie.
 // Eine fremde receiptId trifft dadurch 0 Zeilen statt einer fremden Zeile.
 
-import { and, desc, eq, gte, ilike, lte, or, sql } from 'drizzle-orm';
+import { and, eq, gte, ilike, isNotNull, lte, or, sql, type SQL } from 'drizzle-orm';
 import { db } from './index';
 import { pendingReviews, receipts, type PendingReviewRow, type ReceiptRow } from './schema';
 import { computeConfidence, type ReceiptCandidate } from '../mastra/receipts/candidate';
@@ -67,30 +67,32 @@ export async function saveReceipt(userId: string, input: SaveReceiptInput): Prom
   return row;
 }
 
+/** Nach welchen Spalten sortiert werden darf. Keine freie Spaltenwahl von aussen. */
+export const RECEIPT_SORT_FIELDS = [
+  'receiptDate',
+  'totalAmount',
+  'createdAt',
+  'merchant',
+] as const;
+export type ReceiptSortField = (typeof RECEIPT_SORT_FIELDS)[number];
+
+const SORT_COLUMNS = {
+  receiptDate: receipts.receiptDate,
+  totalAmount: receipts.totalAmount,
+  createdAt: receipts.createdAt,
+  merchant: receipts.merchant,
+} as const satisfies Record<ReceiptSortField, unknown>;
+
 export type ListReceiptsFilter = {
   limit?: number;
+  offset?: number;
   from?: string;
   to?: string;
+  /** Exakte Kategorie. Leerstring heisst "kein Filter", nicht "Kategorie leer". */
+  category?: string;
+  sort?: ReceiptSortField;
+  dir?: 'asc' | 'desc';
 };
-
-/** Belege des Nutzers, neueste zuerst. Nutzt den (user_id, receipt_date DESC)-Index. */
-export async function listReceipts(
-  userId: string,
-  filter: ListReceiptsFilter = {},
-): Promise<ReceiptRow[]> {
-  const limit = Math.min(Math.max(filter.limit ?? 10, 1), 50);
-
-  const conditions = [eq(receipts.userId, userId)];
-  if (filter.from) conditions.push(gte(receipts.receiptDate, filter.from));
-  if (filter.to) conditions.push(lte(receipts.receiptDate, filter.to));
-
-  return db
-    .select()
-    .from(receipts)
-    .where(and(...conditions))
-    .orderBy(desc(receipts.receiptDate), desc(receipts.createdAt))
-    .limit(limit);
-}
 
 export type SearchReceiptsFilter = ListReceiptsFilter & {
   query: string;
@@ -98,34 +100,159 @@ export type SearchReceiptsFilter = ListReceiptsFilter & {
   maxAmount?: string;
 };
 
+/** Obergrenze einer Seite. 200 ist die groesste Seitengroesse der Weboberflaeche. */
+const MAX_LIMIT = 200;
+
+/**
+ * Die EINE Stelle, an der aus Nutzer und Filter eine WHERE-Bedingung wird.
+ *
+ * Liste, Suche und Zaehlung laufen alle hier durch – sonst zeigt die Tabelle
+ * eine andere Menge als ihre Trefferzahl, und ein Export eine dritte. Das
+ * `eq(userId)` steht bewusst unbedingt am Anfang und nicht in einem if.
+ */
+function buildConditions(userId: string, filter: Partial<SearchReceiptsFilter>): SQL[] {
+  const conditions: SQL[] = [eq(receipts.userId, userId)];
+
+  if (filter.query) {
+    // LIKE-Metazeichen entschaerfen: ein eingegebenes "%" ist in einem
+    // Haendlernamen legitimer Text und kein Platzhalter, der alles trifft.
+    const pattern = `%${filter.query.replace(/[\\%_]/g, char => `\\${char}`)}%`;
+    conditions.push(
+      or(
+        ilike(receipts.merchant, pattern),
+        ilike(receipts.category, pattern),
+        ilike(receipts.receiptType, pattern),
+        ilike(receipts.referenceNumber, pattern),
+      )!,
+    );
+  }
+
+  // Zeitraum auf dem BELEGDATUM, nicht auf created_at. Ein Beleg vom 31.12.
+  // kann am 3.1. erfasst worden sein, und fuer die Buchhaltung zaehlt das
+  // Belegdatum.
+  if (filter.from) conditions.push(gte(receipts.receiptDate, filter.from));
+  if (filter.to) conditions.push(lte(receipts.receiptDate, filter.to));
+  if (filter.category) conditions.push(eq(receipts.category, filter.category));
+  if (filter.minAmount) conditions.push(gte(receipts.totalAmount, filter.minAmount));
+  if (filter.maxAmount) conditions.push(lte(receipts.totalAmount, filter.maxAmount));
+
+  return conditions;
+}
+
+/**
+ * ORDER BY inklusive NULLS LAST.
+ *
+ * Ohne das stehen bei DESC die NULL-Werte oben (Postgres-Default ist DESC NULLS
+ * FIRST) – eine Tabelle, die mit lauter leeren Datumszellen anfaengt, waehrend
+ * die Daten darunter liegen. `id` als letztes Kriterium macht die Reihenfolge
+ * eindeutig; sonst kann dieselbe Zeile bei zwei Seitenaufrufen auf zwei Seiten
+ * landen.
+ */
+function buildOrderBy(filter: ListReceiptsFilter): SQL[] {
+  const column = SORT_COLUMNS[filter.sort ?? 'receiptDate'];
+  const direction = filter.dir === 'asc' ? 'asc' : 'desc';
+  return [
+    sql`${column} ${sql.raw(direction)} nulls last`,
+    sql`${receipts.createdAt} ${sql.raw(direction)}`,
+    sql`${receipts.id} ${sql.raw(direction)}`,
+  ];
+}
+
+async function selectPage(
+  userId: string,
+  filter: Partial<SearchReceiptsFilter>,
+): Promise<ReceiptRow[]> {
+  const limit = Math.min(Math.max(filter.limit ?? 10, 1), MAX_LIMIT);
+  const offset = Math.max(filter.offset ?? 0, 0);
+
+  return db
+    .select()
+    .from(receipts)
+    .where(and(...buildConditions(userId, filter)))
+    .orderBy(...buildOrderBy(filter))
+    .limit(limit)
+    .offset(offset);
+}
+
+/** Belege des Nutzers, neueste zuerst. Nutzt den (user_id, receipt_date DESC)-Index. */
+export async function listReceipts(
+  userId: string,
+  filter: ListReceiptsFilter = {},
+): Promise<ReceiptRow[]> {
+  return selectPage(userId, filter);
+}
+
 /** Volltext-nahe Suche über Händler, Kategorie, Belegart und Referenznummer. */
 export async function searchReceipts(
   userId: string,
   filter: SearchReceiptsFilter,
 ): Promise<ReceiptRow[]> {
-  const limit = Math.min(Math.max(filter.limit ?? 10, 1), 50);
-  const pattern = `%${filter.query}%`;
+  return selectPage(userId, filter);
+}
 
-  const conditions = [
-    eq(receipts.userId, userId),
-    or(
-      ilike(receipts.merchant, pattern),
-      ilike(receipts.category, pattern),
-      ilike(receipts.receiptType, pattern),
-      ilike(receipts.referenceNumber, pattern),
-    )!,
-  ];
-  if (filter.from) conditions.push(gte(receipts.receiptDate, filter.from));
-  if (filter.to) conditions.push(lte(receipts.receiptDate, filter.to));
-  if (filter.minAmount) conditions.push(gte(receipts.totalAmount, filter.minAmount));
-  if (filter.maxAmount) conditions.push(lte(receipts.totalAmount, filter.maxAmount));
-
-  return db
-    .select()
+/**
+ * Trefferzahl unter denselben Filtern – ohne limit/offset.
+ *
+ * Getrennt von der Seite, weil die Oberflaeche beides braucht: die Zeilen
+ * dieser Seite und die Gesamtzahl fuer Paginierung und Export-Aufschrift.
+ */
+export async function countReceipts(
+  userId: string,
+  filter: Partial<SearchReceiptsFilter> = {},
+): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
     .from(receipts)
-    .where(and(...conditions))
-    .orderBy(desc(receipts.receiptDate), desc(receipts.createdAt))
-    .limit(limit);
+    .where(and(...buildConditions(userId, filter)));
+
+  return row?.count ?? 0;
+}
+
+/**
+ * Anzahl und Summe je Waehrung, unter denselben Filtern.
+ *
+ * Getrennt nach Waehrung und nicht als eine Zahl: Betraege in CHF und EUR zu
+ * addieren ergibt keinen Wert, sondern eine falsche Zahl. Ein Kurs steht
+ * nirgends im System, und ihn hier zu erfinden waere die schlechteste Stelle
+ * dafuer. Belege ohne Waehrung kommen als `currency: null` zurueck.
+ *
+ * Die Summe wird in Postgres gerechnet (`sum(numeric)`), nicht in JavaScript:
+ * ein Aufaddieren von Strings ueber Number() verliert Rappen, sobald es viele
+ * Zeilen sind.
+ */
+export async function summarizeReceipts(
+  userId: string,
+  filter: Partial<SearchReceiptsFilter> = {},
+): Promise<{ currency: string | null; count: number; sum: string }[]> {
+  const rows = await db
+    .select({
+      currency: receipts.currency,
+      count: sql<number>`count(*)::int`,
+      sum: sql<string>`coalesce(sum(${receipts.totalAmount}), 0)::text`,
+    })
+    .from(receipts)
+    .where(and(...buildConditions(userId, filter)))
+    .groupBy(receipts.currency)
+    .orderBy(sql`count(*) desc`);
+
+  return rows.map(row => ({ ...row, currency: row.currency?.trim() ?? null }));
+}
+
+/**
+ * Die Kategorien, die dieser Nutzer tatsaechlich vergeben hat.
+ *
+ * Fuer das Filter-Dropdown: eine feste Liste im Frontend waere eine zweite
+ * Wahrheit neben den Daten, und der Extraktions-Agent kategorisiert bewusst
+ * nicht – die Werte kommen also ausschliesslich von Menschen.
+ */
+export async function listCategories(userId: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ category: receipts.category })
+    .from(receipts)
+    .where(and(eq(receipts.userId, userId), isNotNull(receipts.category)))
+    .orderBy(receipts.category);
+
+  return rows.map(row => row.category).filter((value): value is string => !!value);
 }
 
 /** Die Felder, die nachträglich korrigierbar sind. Datei-Referenz und Hash nicht. */

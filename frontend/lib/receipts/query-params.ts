@@ -1,37 +1,83 @@
-// URL <-> Abfrage. Der gesamte Filter- und Sortierzustand steht in den
-// Query-Parametern und nirgends sonst: damit ist eine Ansicht teilbar, der
-// Zurueck-Button funktioniert, und der Export-Endpunkt kann exakt dieselben
-// Parameter parsen wie die Seite (er tut es auch - siehe app/api/export).
+// URL <-> Abfrage. Der gesamte Filterzustand steht in den Query-Parametern und
+// nirgends sonst: damit ist eine Ansicht teilbar, der Zurueck-Button
+// funktioniert, und der Export-Endpunkt parst exakt dieselben Parameter wie die
+// Seite (er tut es auch - siehe app/api/export).
+
+/** Die Zeitraeume aus dem Mockup. Kein freies Datumsfeld, drei Vorgaben. */
+export const PERIODS = [
+  { value: "30", label: "Last 30 days", days: 30 },
+  { value: "90", label: "Last 90 days", days: 90 },
+  { value: "all", label: "All time", days: null },
+] as const;
+
+export type Period = (typeof PERIODS)[number]["value"];
+const DEFAULT_PERIOD: Period = "30";
 
 /** Nach welchen Spalten sortiert werden darf. Keine freie Spaltenwahl aus der URL. */
 export const SORT_FIELDS = ["receiptDate", "totalAmount", "createdAt", "merchant"] as const;
 export type SortField = (typeof SORT_FIELDS)[number];
-
 export type SortDirection = "asc" | "desc";
 
 export const PAGE_SIZES = [25, 50, 100, 200] as const;
 const DEFAULT_PAGE_SIZE = 50;
 
 export type ReceiptQuery = {
-  /** Freitext ueber Haendler und Kategorie. Leerstring heisst "kein Filter". */
+  /**
+   * Freitext ueber Haendler, Kategorie, Belegart und Referenznummer.
+   *
+   * Die Vorlage zeigt kein Suchfeld, der Dienst kann es aber - der Parameter
+   * bleibt deshalb lesbar, damit ein geteilter Link mit ?q= funktioniert.
+   */
   q: string;
-  /** Zeitraum auf dem BELEGDATUM (receipt_date), nicht auf createdAt. YYYY-MM-DD. */
-  from: string | null;
-  to: string | null;
+  period: Period;
+  /** Exakte Kategorie. Leer heisst "alle", nicht "ohne Kategorie". */
+  category: string;
   sort: SortField;
   dir: SortDirection;
   page: number;
   pageSize: number;
+  /**
+   * Zeitraum auf dem BELEGDATUM (receipt_date), abgeleitet aus `period`.
+   * YYYY-MM-DD oder null. Steht nicht in der URL: `period` ist die Wahrheit,
+   * `from` die Rechnung daraus.
+   */
+  from: string | null;
+  to: string | null;
 };
 
 /** Query-Parameter, die zur Abfrage gehoeren - fuer Links, die andere behalten sollen. */
-export const QUERY_PARAM_KEYS = ["q", "from", "to", "sort", "dir", "page", "pageSize"] as const;
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const QUERY_PARAM_KEYS = [
+  "q",
+  "period",
+  "category",
+  "sort",
+  "dir",
+  "page",
+  "pageSize",
+] as const;
 
 function readOne(params: URLSearchParams, key: string): string | null {
   const value = params.get(key);
   return value === null || value.trim() === "" ? null : value.trim();
+}
+
+/**
+ * Der Zeitraum als Datumsgrenze.
+ *
+ * Bewusst auf dem Kalendertag gerechnet und nicht auf einem Zeitstempel: das
+ * Belegdatum ist ein `date`. Ein Tag durch eine Zeitzonenkonvertierung zu
+ * schicken verschiebt ihn (siehe format.ts), deshalb Europe/Zurich explizit
+ * beim Bestimmen von "heute".
+ */
+export function periodStart(period: Period, today = new Date()): string | null {
+  const days = PERIODS.find((entry) => entry.value === period)?.days ?? null;
+  if (days === null) return null;
+
+  const swissToday = new Date(
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Zurich" }).format(today),
+  );
+  swissToday.setUTCDate(swissToday.getUTCDate() - days);
+  return swissToday.toISOString().slice(0, 10);
 }
 
 /**
@@ -40,14 +86,11 @@ function readOne(params: URLSearchParams, key: string): string | null {
  * eine Tabelle zeigen und keine Fehlerseite.
  */
 export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
+  const periodRaw = readOne(input, "period");
+  const period = PERIODS.find((entry) => entry.value === periodRaw)?.value ?? DEFAULT_PERIOD;
+
   const sortRaw = readOne(input, "sort");
   const sort = SORT_FIELDS.find((field) => field === sortRaw) ?? "receiptDate";
-
-  const dirRaw = readOne(input, "dir");
-  const dir: SortDirection = dirRaw === "asc" ? "asc" : "desc";
-
-  const from = readOne(input, "from");
-  const to = readOne(input, "to");
 
   const pageSizeRaw = Number(readOne(input, "pageSize"));
   const pageSize = PAGE_SIZES.find((size) => size === pageSizeRaw) ?? DEFAULT_PAGE_SIZE;
@@ -57,12 +100,14 @@ export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
 
   return {
     q: readOne(input, "q") ?? "",
-    from: from && ISO_DATE.test(from) ? from : null,
-    to: to && ISO_DATE.test(to) ? to : null,
+    period,
+    category: readOne(input, "category") ?? "",
     sort,
-    dir,
+    dir: readOne(input, "dir") === "asc" ? "asc" : "desc",
     page,
     pageSize,
+    from: periodStart(period),
+    to: null,
   };
 }
 
@@ -81,17 +126,24 @@ export function toSearchParams(
 /**
  * Serialisiert zurueck in eine URL - nur was vom Default abweicht, damit die
  * Adresszeile lesbar bleibt. `page` faellt raus, wenn es 1 ist.
+ *
+ * Jede Filteraenderung setzt die Seite zurueck: Seite 7 eines anderen Filters
+ * ist meistens leer, und eine leere Tabelle nach einem Klick auf einen Filter
+ * sieht wie ein Fehler aus.
  */
 export function serializeReceiptQuery(
   query: ReceiptQuery,
   overrides: Partial<ReceiptQuery> = {},
 ): string {
-  const merged = { ...query, ...overrides };
+  const resetsPage = Object.keys(overrides).some((key) =>
+    ["q", "period", "category", "pageSize", "sort", "dir"].includes(key),
+  );
+  const merged = { ...query, ...overrides, ...(resetsPage ? { page: 1 } : {}) };
   const params = new URLSearchParams();
 
   if (merged.q) params.set("q", merged.q);
-  if (merged.from) params.set("from", merged.from);
-  if (merged.to) params.set("to", merged.to);
+  if (merged.period !== DEFAULT_PERIOD) params.set("period", merged.period);
+  if (merged.category) params.set("category", merged.category);
   if (merged.sort !== "receiptDate") params.set("sort", merged.sort);
   if (merged.dir !== "desc") params.set("dir", merged.dir);
   if (merged.pageSize !== DEFAULT_PAGE_SIZE) params.set("pageSize", String(merged.pageSize));
@@ -102,5 +154,5 @@ export function serializeReceiptQuery(
 
 /** True, wenn ueberhaupt ein Filter gesetzt ist - unterscheidet die Empty States. */
 export function hasActiveFilter(query: ReceiptQuery): boolean {
-  return query.q !== "" || query.from !== null || query.to !== null;
+  return query.q !== "" || query.category !== "" || query.period !== DEFAULT_PERIOD;
 }

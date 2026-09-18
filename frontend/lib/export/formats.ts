@@ -5,20 +5,20 @@
 // dort wird nur noch EXPORT_FORMATS[name] nachgeschlagen. Implementiert ist
 // jetzt ausschliesslich CSV.
 
-import type { ReceiptRow } from "../receipts/queries";
+import type { ApiReceipt } from "../api/receipts";
 import { csvHeaderLine, csvOptionsFor, csvRowLine } from "./csv";
 
 export type ExportFormat = {
   contentType: string;
   extension: string;
   /**
-   * Verwandelt die Baender aus streamReceipts() in einen Byte-Strom.
+   * Verwandelt die Seiten aus streamReceipts() in einen Byte-Strom.
    *
    * Bewusst Strom und nicht Buffer: ein Export ueber mehrere Jahre soll nicht
    * erst vollstaendig im Speicher stehen, bevor das erste Byte rausgeht.
    */
   createStream: (
-    batches: AsyncIterable<ReceiptRow[]>,
+    batches: AsyncIterable<ApiReceipt[]>,
     params: URLSearchParams,
   ) => ReadableStream<Uint8Array>;
 };
@@ -81,17 +81,17 @@ function resolveDelimiter(raw: string | null): string {
 }
 
 /**
- * Dateiname mit Zeitraum, z. B. belege_2026-01-01_2026-03-31.csv.
+ * Dateiname mit Zeitraum, z. B. receipts_2026-01-01_2026-03-31.csv.
  *
  * Ohne gesetzten Zeitraum steht das Abrufdatum drin - ein Dateiname wie
- * "belege.csv" ist im Download-Ordner nach dem zweiten Export nicht mehr
+ * "receipts.csv" ist im Download-Ordner nach dem zweiten Export nicht mehr
  * zuzuordnen.
  */
 export function exportFileName(from: string | null, to: string | null, extension: string): string {
   const today = new Date().toISOString().slice(0, 10);
 
   const range =
-    from && to ? `${from}_${to}` : from ? `ab_${from}` : to ? `bis_${to}` : `alle_${today}`;
+    from && to ? `${from}_${to}` : from ? `from_${from}` : to ? `until_${to}` : `all_${today}`;
 
-  return `belege_${range}.${extension}`;
+  return `receipts_${range}.${extension}`;
 }

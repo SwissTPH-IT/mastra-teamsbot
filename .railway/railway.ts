@@ -72,21 +72,35 @@ export default defineRailway(() => {
   });
 
   // Die Weboberflaeche: dasselbe Repo, unterschieden allein durch
-  // dockerfilePath. Kein Volume, keine Migration - sie liest nur.
+  // dockerfilePath. Kein Volume, keine Migration - und seit dem Umbau auf den
+  // API-Dienst auch KEIN DATABASE_URL: sie hat keine Datenbankverbindung mehr.
+  // Das ist der Grund, warum das Verbindungsbudget wieder Luft hat (Agent 8 +
+  // API 5 statt zusaetzlich 3).
   const receiptFrontend = service("receipt-frontend", {
     source: github(REPO, { checkSuites: false }),
     build: { builder: "DOCKERFILE", dockerfilePath: "frontend/Dockerfile" },
     deploy: { healthcheckPath: "/api/healthz", healthcheckTimeout: 60, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
     replicas: { [REGION]: 1 },
     env: {
-      // Echte Referenz statt preserve(): auf einem neuen Service gibt es nichts
-      // zu erhalten. Dieselbe Instanz wie der Agent, eigener kleiner Pool.
-      DATABASE_URL: Postgres.env.DATABASE_URL,
+      // Alle Belegdaten kommen ueber den Dienst. Literal mit Railways
+      // ${{...}}-Syntax, weil hier ein Wert zusammengesetzt wird - ein
+      // Referenz-Objekt liesse sich darin nicht interpolieren (es wuerde zu
+      // "[object Object]").
+      API_URL: `http://\${{${receiptApi.name}.RAILWAY_PRIVATE_DOMAIN}}:4000`,
+      // Dasselbe Geheimnis wie beim Dienst und beim Agenten. preserve(): nie
+      // im Repo. Damit darf dieser Service im Namen jedes Nutzers lesen -
+      // welcher es ist, bestimmt die oid aus der Session (X-Subject-Aad).
+      API_SERVICE_TOKEN: preserve(),
       // Nur fuer die Belegbilder, die als Dateien am Volume des Agenten liegen.
-      // Literal mit Railways ${{...}}-Syntax, weil hier ein Wert zusammengesetzt
-      // wird - eine Referenz allein liesse sich nicht interpolieren.
       MASTRA_URL: `http://\${{${mastraAgent.name}.RAILWAY_PRIVATE_DOMAIN}}:4111`,
-      FRONTEND_DB_POOL_MAX: "3",
+      // Anmeldung ueber Entra. AUTH_URL muss die oeffentliche URL sein: hinter
+      // Railways Proxy baut Auth.js die Redirect-URI sonst aus dem internen
+      // Host, und der Rueckweg von Microsoft landet im Leeren.
+      AUTH_SECRET: preserve(),
+      AUTH_URL: preserve(),
+      AUTH_MICROSOFT_ENTRA_ID_ID: preserve(),
+      AUTH_MICROSOFT_ENTRA_ID_SECRET: preserve(),
+      AUTH_MICROSOFT_ENTRA_ID_ISSUER: preserve(),
     },
   });
 

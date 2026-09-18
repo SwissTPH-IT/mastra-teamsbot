@@ -13,10 +13,12 @@ Drei Container, ein `docker compose up`:
 | | Wer | Was | Mandantentrennung |
 |---|---|---|---|
 | **Microsoft Teams** | Endnutzer | Beleg einreichen, Vorschlag per Karte bestätigen oder anpassen | hart verdrahtet: jeder sieht nur seine eigenen Belege |
-| **Weboberfläche** | Finanzteam | die erfassten Daten ansehen, durchsuchen, als CSV exportieren | bewusst keine: übergreifende Ansicht, der Nutzer ist Datenfeld, nicht Berechtigungsgrenze |
+| **Weboberfläche** | Endnutzer | eigene Belege ansehen, prüfen, Kategorie und Belegart setzen, als CSV exportieren | über den API-Dienst: die Entra-`oid` aus der Session wird zur Teams-userId aufgelöst |
 
-Erfasst wird ausschliesslich über Teams. Die Weboberfläche ist **read-only** und
-hat **kein Login** – siehe `frontend/README.md`, Abschnitt „Kein Login".
+Erfasst wird ausschliesslich über Teams. Die Weboberfläche verlangt eine
+**Anmeldung über Entra** und hat **keine Datenbankverbindung** – sie liest alles
+über den API-Dienst in `api/`. Siehe `frontend/README.md`, Abschnitt
+„Variante A".
 
 ## Voraussetzungen
 
@@ -49,7 +51,7 @@ hat **kein Login** – siehe `frontend/README.md`, Abschnitt „Kein Login".
 
    | URL | Zweck |
    |---|---|
-   | http://localhost:3000/belege | **Belegtabelle** – die Sicht des Finanzteams |
+   | http://localhost:3000 | **Spesen-Selbstverwaltung** – eigene Belege, nach Entra-Login |
    | http://localhost:4111 | Mastra Studio – Agenten/Workflow direkt testen, Traces ansehen |
    | http://localhost:4111/swagger-ui | REST-API aller Endpunkte |
 
@@ -57,6 +59,10 @@ hat **kein Login** – siehe `frontend/README.md`, Abschnitt „Kein Login".
    Human-in-the-Loop-Flow"). Ohne eingerichtete Bot-Registration bleibt die
    Tabelle leer – zum Ausprobieren lässt sich der Extraktions-Workflow im Studio
    direkt starten.
+
+   Die Weboberfläche verlangt eine Anmeldung: ohne konfigurierte
+   Entra-App-Registrierung (`frontend/.env.example`) kommt man über `/signin`
+   nicht hinaus.
 
 ## Der Ablauf
 
@@ -74,9 +80,10 @@ Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
                                       │             (Button, Dialog oder Text)
                                       └─ persist-receipt    → app.receipts
 
-Browser ─► /belege ──────────► app.receipts (lesend, Drizzle, serverseitig)
-           /api/export ──────► app.receipts (lesend, gestreamt als CSV)
-           /api/belege/<id>/bild ─► GET /receipts/<uploadId>/file  (Proxy auf den Agenten)
+Browser ─► Frontend (Entra-Login) ─► receipt-api ─► app.receipts
+           /, /receipts, /receipts/<id>   Bearer API_SERVICE_TOKEN
+           /api/export (CSV, gestreamt)   X-Subject-Aad: <oid> -> app.users
+           /api/receipts/<id>/image ─► GET /receipts/<uploadId>/file (Proxy auf den Agenten)
 ```
 
 Der entscheidende Punkt: **das Bild reist nie durch den Chat-Kontext.** Die Datei
@@ -135,34 +142,42 @@ Migrationen bleiben hier.
 
 ### Frontend (`frontend/`)
 
-Read-only-Oberfläche auf `app.receipts`: Tabelle, Detailansicht, CSV-Export.
-Details in `frontend/README.md`; hier nur die Einordnung.
+Die Spesen-Selbstverwaltung: nach dem Entra-Login sieht jeder **seine eigenen**
+Belege, prüft die ausgelesenen Werte, setzt Kategorie und Belegart und exportiert
+als CSV. Grundlage ist das Mockup `dev/Swiss TPH Expenses.html`; umgesetzt ist
+daraus der Belegteil, die Abrechnungen sind sichtbar ausgegraut. Details in
+`frontend/README.md`; hier nur die Einordnung.
 
 | Datei | Zweck |
 |---|---|
-| `app/belege/page.tsx` | Die Tabelle: Filterleiste + Ergebnis, Server Component |
-| `app/belege/[id]/page.tsx` | Detailansicht eines Belegs inkl. Belegbild |
+| `auth.ts` | Auth.js v5 mit Entra-Provider, Session mit `oid` |
+| `proxy.ts` | Login-Pflicht, Positivliste des Öffentlichen |
+| `app/(app)/page.tsx` | Startseite: Kennzahl, Abrechnungskacheln (aus), letzte Belege |
+| `app/(app)/receipts/page.tsx` | Liste: Filter, Tabelle, Blätterer |
+| `app/(app)/receipts/[id]/page.tsx` | Detail: Bild, Prüfhinweis, Felder, Korrektur |
 | `app/api/export/route.ts` | CSV, serverseitig gestreamt, dieselben Filter wie die Ansicht |
-| `app/api/healthz/route.ts` | Health-Check inklusive `SELECT 1` |
-| `app/api/belege/[id]/bild/route.ts` | Proxy auf `GET /receipts/:uploadId/file` beim Agenten |
-| `lib/db/client.ts` | Eigener kleiner Pool (Default 3) + Drizzle |
-| `lib/receipts/scope.ts` | `ReceiptScope` – der Einhängepunkt für eine spätere Berechtigung |
-| `lib/receipts/where.ts` | `buildReceiptWhere()` – die **eine** Stelle für Filterlogik |
-| `lib/receipts/queries.ts` | `listReceipts` / `countReceipts` / `getReceipt` / `streamReceipts` |
+| `app/api/healthz/route.ts` | Health-Check inklusive Belegdienst, ohne Login |
+| `app/api/receipts/[id]/image/route.ts` | Proxy auf `GET /receipts/:uploadId/file` beim Agenten |
+| `lib/api/client.ts` | Der **eine** Weg zu den Daten: Service-Token + `X-Subject-Aad` |
+| `lib/api/receipts.ts` | Typisierte Aufrufe, der Vertrag mit dem Dienst |
+| `lib/receipts/review.ts` | Wann ein Beleg nachgesehen werden muss |
 | `lib/export/formats.ts` | Format-Registry, damit `.xlsx` später daneben passt |
 
-Drei Dinge, die dabei absichtlich so sind:
+Vier Dinge, die dabei absichtlich so sind:
 
-- **Das Schema wird importiert, nicht dupliziert.** `frontend/` ist ein
-  npm-Workspace dieses Repos und importiert `mastra-teamsbot/db/schema` (also
-  `src/db/schema.ts`). Es führt keine Migrationen aus, definiert keine Tabelle
-  und greift nie auf `mastra_*` zu.
+- **Keine Datenbankverbindung.** Kein Pool, kein Drizzle, kein Schema-Import.
+  Alle Belegdaten kommen über den Dienst in `api/` – das ist der ganze Punkt von
+  Variante A: die Mandantentrennung liegt an einer Stelle statt an zwei.
+- **Das Subject kommt aus der Session.** Mit dem Service-Token darf der Prozess
+  im Namen jedes Nutzers lesen; welcher es ist, sagt die `oid` aus dem
+  signierten ID-Token, niemals ein Wert aus einem Browser-Request.
 - **Kein assistant-ui, kein Chat, kein LLM-Aufruf.** Auf dieser Seite des Flows
   gibt es keinen AI-Use-Case; eine Chat-Oberfläche zwischen Nutzer und Tabelle
-  macht das Filtern langsamer, nicht schneller. Die Datenzugriffsschicht ist von
-  der UI getrennt, damit AI-Funktionen später ein Zusatz wären.
-- **Kein Login.** Bewusst noch nicht – siehe `frontend/README.md` und
-  „Vor dem Livegang beachten".
+  macht das Filtern langsamer, nicht schneller.
+- **Genau eine schreibende Stelle:** Kategorie und Belegart (`PATCH
+  /receipts/:id`). Die beiden lässt der Extraktions-Agent bewusst leer. Betrag,
+  Datum und Währung bleiben dem Teams-Dialog vorbehalten, wo das Belegbild
+  daneben liegt.
 
 Damit sind zwei Backend-Bausteine derzeit **ohne Aufrufer**: `chatRoute()` mit
 `receiptChatAgent`/`extract-receipt-tool` und `POST /receipts/upload`. Beide sind
@@ -216,9 +231,9 @@ Die Poolgrösse steht auf 8 (`DB_POOL_MAX`), nicht auf dem `PostgresStore`-Defau
 von 20: eine kleine Railway-Instanz erlaubt rund 20 Verbindungen insgesamt, und
 davon brauchen auch der Migrations-Job und das Frontend welche.
 
-Das Frontend hat einen **eigenen** Pool (`frontend/lib/db/client.ts`,
-`FRONTEND_DB_POOL_MAX`, Default 3) – es ist ein anderer Prozess. Es teilt
-lediglich die Instanz und das Schema, nicht den Pool.
+Der API-Dienst hat einen **eigenen** Pool (`DB_POOL_MAX` dort auf 5) – es ist ein
+anderer Prozess. Er teilt lediglich die Instanz und das Schema, nicht den Pool.
+Das Frontend hat seit Variante A gar keinen mehr: es liest über den Dienst.
 
 ### Offene Lücke: Objektspeicher
 
@@ -234,15 +249,18 @@ Originalbilder nach jedem Redeploy weg**, auch wenn die Belegdaten in Postgres
 
 ## Wie der Browser an die Daten kommt
 
-Gar nicht direkt: die Weboberfläche liest die Datenbank **serverseitig** (Server
-Components und Route Handler). Es gibt keinen Datenbankzugriff aus dem Browser
-und keinen Connection String im Client-Bundle.
+Gar nicht direkt, und seit Variante A auch nicht mehr aus der Datenbank: die
+Weboberfläche ruft **serverseitig** (Server Components und Route Handler) den
+Belegdienst in `api/`. Es gibt keinen Connection String und kein Token im
+Client-Bundle, und keine `NEXT_PUBLIC_*`-Variable.
 
 Mit dem Mastra-Server spricht das Frontend nur noch an einer Stelle – für das
 Belegbild, das als Datei im Datenverzeichnis des Agenten liegt und nicht in
 Postgres. Das läuft über den eigenen Route Handler
-`/api/belege/<id>/bild` und damit serverseitig; `MASTRA_URL` ist bewusst keine
-`NEXT_PUBLIC_*`-Variable und landet nicht im Browser.
+`/api/receipts/<id>/image`, und zwar erst **nachdem** der Belegdienst bestätigt
+hat, dass der Beleg dem angemeldeten Nutzer gehört: der Endpunkt des Agenten hat
+selbst keine Autorisierung, deshalb hängt die Route an der Beleg-id und nicht an
+der uploadId.
 
 Damit ist `FRONTEND_ORIGIN` / `server.cors` in `src/mastra/index.ts` für den
 Normalbetrieb ohne Funktion – kein Browser ruft Mastra direkt auf. Die Freigabe
@@ -563,9 +581,10 @@ kommen aus der IaC-Definition.
 Services:
 
 - `mastra-agent` – zwingend, das Bot Framework ruft den Webhook von aussen auf.
-- `receipt-frontend` – damit das Finanzteam die Tabelle erreicht. Die Oberfläche
-  ist unauthentifiziert; wer die URL hat, sieht die Belege aller Nutzer (siehe
-  „Frontend-Service").
+- `receipt-frontend` – damit die Nutzer ihre Belege erreichen. Die generierte
+  Domain gehört anschliessend als `AUTH_URL` an den Service und als Redirect-URI
+  (`/api/auth/callback/microsoft-entra-id`) in die App-Registrierung – ohne
+  beides endet die Anmeldung im Leeren (siehe „Frontend-Service").
 
 IaC lässt `networking` bewusst unangetastet, deshalb ist das ein Klick im
 Dashboard und keine Zeile in der Definition.
@@ -606,8 +625,10 @@ gut:
 2. Der Bot legt die gelesenen Werte als Karte vor (Datum, Währung, Steuer, Total).
 3. „Bestätigen & speichern" klicken – oder „Anpassen", im Dialog ein Feld ändern
    und übernehmen.
-4. Im Frontend unter `/belege` erscheint die Zeile – mit dem Belegdatum, dem
-   Betrag in `de-CH` und dem Erfassungszeitpunkt in `Europe/Zurich`.
+4. Im Frontend unter `/receipts` erscheint die Zeile – mit dem Belegdatum, dem
+   Betrag in `de-CH` und dem Erfassungszeitpunkt in `Europe/Zurich`. Voraussetzung
+   ist, dass dieselbe Person angemeldet ist: die Zuordnung läuft über
+   `app.users.aad_object_id`.
 5. Detailseite öffnen: das Belegbild wird über den Proxy geladen (beweist, dass
    Private Networking und das Volume stehen).
 6. CSV exportieren und in Excel öffnen: Umlaute intakt, Spalten getrennt.
@@ -851,29 +872,39 @@ const frontend = service('receipt-frontend', {
   build: { builder: 'DOCKERFILE', dockerfilePath: 'frontend/Dockerfile' },
   deploy: { healthcheckPath: '/api/healthz', healthcheckTimeout: 60 },
   env: {
-    DATABASE_URL: db.env.DATABASE_URL,
+    API_URL: privateUrl(api, 4000),
+    API_SERVICE_TOKEN: preserve(),
     MASTRA_URL: privateUrl(agent, 4111),
-    FRONTEND_DB_POOL_MAX: '3',
+    AUTH_SECRET: preserve(),
+    AUTH_URL: preserve(),
+    AUTH_MICROSOFT_ENTRA_ID_ID: preserve(),
+    AUTH_MICROSOFT_ENTRA_ID_SECRET: preserve(),
+    AUTH_MICROSOFT_ENTRA_ID_ISSUER: preserve(),
   },
 });
 ```
 
-Kein Volume und keine Migration: die Oberfläche liest nur und erwartet
-`app.receipts` als vorhanden. `DATABASE_URL` zeigt als **Referenz** auf denselben
-Postgres-Service – keine zweite Datenbank, kein kopierter Connection String.
-`MASTRA_URL` wird nur für die Belegbilder gebraucht, die als Dateien am Volume
-des Agenten liegen, und läuft über Private Networking.
+Kein Volume, keine Migration und **kein `DATABASE_URL`**: seit Variante A hat die
+Oberfläche keine Datenbankverbindung mehr, alle Belegdaten kommen über den
+API-Dienst. `MASTRA_URL` wird nur für die Belegbilder gebraucht, die als Dateien
+am Volume des Agenten liegen; beide Adressen laufen über Private Networking.
+
+`AUTH_URL` muss die **öffentliche** URL sein: hinter Railways Proxy baut Auth.js
+die Redirect-URI sonst aus dem internen Hostnamen, und der Rückweg von Microsoft
+landet im Leeren. Dieselbe URL gehört als Redirect-URI in die
+App-Registrierung, mit dem Pfad `/api/auth/callback/microsoft-entra-id`.
 
 **Domain:** `networking` bleibt in der Definition unangetastet, damit ein im
 Dashboard generiertes `*.up.railway.app` nicht wegkonfiguriert wird. Die
-Oberfläche ist unauthentifiziert und zeigt die Belegdaten **aller** Nutzer – eine
-bewusste Entscheidung für diese Version (kleines, festes Finanzteam), begründet in
-`frontend/README.md`. Wer die URL hat, sieht die Daten.
+Oberfläche verlangt eine Anmeldung über Entra und zeigt jedem nur seine eigenen
+Belege; wer angemeldet ist, aber keine in Teams erfassten Belege hat, sieht eine
+Erklärung statt einer leeren Tabelle.
 
 **Poolgrösse ernst nehmen:** eine kleine Railway-Postgres-Instanz erlaubt rund 20
-Verbindungen. Agent 8 (`DB_POOL_MAX`) + Frontend 3 (`FRONTEND_DB_POOL_MAX`) +
-Migrations-/Prune-Job lassen Luft; zwei Environments auf **einer** Instanz wären
-schon zu viel – deshalb pro Environment eine eigene Datenbank.
+Verbindungen. Agent 8 (`DB_POOL_MAX`) + API 5 (`DB_POOL_MAX` dort) +
+Migrations-/Prune-Job lassen Luft. Das Frontend zählt nicht mehr mit – es hat
+keinen Pool. Zwei Environments auf **einer** Instanz wären trotzdem zu viel,
+deshalb pro Environment eine eigene Datenbank.
 
 ### Staging und Produktion
 
@@ -887,9 +918,9 @@ Compose-Service ist deshalb ebenfalls auf `postgres:17-alpine` festgenagelt.
 
 **Warum die Reihenfolge im Runbook so ist:** der Agent legt beim ersten Start
 beide Schemas an (`ENTRYPOINT`, `RUN_MODE` ungesetzt). Der Prune-Job auf einer
-leeren Datenbank würde über fehlende Tabellen stolpern, und das Frontend migriert
-nichts – es erwartet `app.receipts` als vorhanden. Deshalb: Postgres, Agent,
-dann der Rest.
+leeren Datenbank würde über fehlende Tabellen stolpern, und weder API-Dienst noch
+Frontend migrieren etwas – sie erwarten `app.receipts` als vorhanden. Deshalb:
+Postgres, Agent, dann der Rest.
 
 **Production nicht neu erfinden:** derselbe Ablauf ab Schritt 3 des Runbooks,
 und erst nach grüner Abnahme auf staging. Die Secrets sind pro Environment neu zu
@@ -928,10 +959,18 @@ Für den Frontend-Service (`frontend/.env.example`):
 
 | Variable | Pflicht | Zweck |
 |---|---|---|
-| `DATABASE_URL` | **ja** | Dieselbe Instanz, als Referenz auf den Postgres-Service |
+| `API_URL` | **ja** | Basis-URL des Belegdienstes (Private Networking) |
+| `API_SERVICE_TOKEN` | **ja** | dasselbe Geheimnis wie beim Dienst und beim Agenten |
+| `AUTH_SECRET` | **ja** | verschlüsselt das Session-Cookie (`openssl rand -base64 32`) |
+| `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` / `_ISSUER` | **ja** | App-Registrierung `receipt-web` |
+| `AUTH_URL` | hinter Proxy | öffentliche URL; ohne sie zeigt der Redirect ins Leere |
 | `MASTRA_URL` | für Belegbilder | Adresse des Agent-Service über Private Networking |
-| `FRONTEND_DB_POOL_MAX` | nein | Poolgrösse des Frontends, Default 3 |
+| `API_TIMEOUT_MS` | nein | Zeitlimit je Aufruf, Default 15000 |
+| `TEAMS_CHAT_URL` | nein | Deep Link für „Capture in Teams"; ohne ihn ist der Knopf aus |
 | `PORT` | nein | setzt Railway selbst; lokal 3000 |
+
+Kein `DATABASE_URL` und kein `FRONTEND_DB_POOL_MAX` mehr: das Frontend hat keine
+Datenbankverbindung.
 
 ### Vor dem Livegang beachten
 
@@ -943,8 +982,11 @@ Für den Frontend-Service (`frontend/.env.example`):
 - **Der Upload-Endpunkt ist offen** (`POST /receipts/upload`).
 - **Die Belegbilder liegen im Dateisystem**, nicht in Postgres. Ein Redeploy ohne
   Volume verliert sie.
-- **Die Weboberfläche ist unauthentifiziert** und zeigt die Belegdaten aller
-  Nutzer – die Mandantentrennung des Teams-Bots gilt dort ausdrücklich nicht. Für
-  diese Version akzeptiert (siehe „Frontend-Service" und
-  `frontend/README.md`). Wenn der Nutzerkreis wächst, ist das die erste Baustelle;
-  `frontend/lib/receipts/scope.ts` ist die dafür vorgesehene Stelle.
+- **Die Weboberfläche verlangt eine Anmeldung** (Entra) und zeigt jedem nur seine
+  eigenen Belege – die Mandantentrennung entscheidet der API-Dienst anhand der
+  `oid`. Was dort noch offen ist: das Frontend ruft den Dienst mit dem
+  **Service-Token** und der `oid` aus der Session (`X-Subject-Aad`), nicht mit
+  einem Nutzertoken. Damit ist der Frontend-Prozess vertrauenswürdig und muss es
+  bleiben; wer ihn kompromittiert, kann fremde Belege lesen. Der strengere Weg
+  (eigene API-Registrierung, Nutzertoken) ist im Dienst schon vorbereitet, siehe
+  `frontend/README.md`.

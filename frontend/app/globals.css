@@ -1,80 +1,88 @@
 @import "tailwindcss";
 
-/* Zuruecknehmende Palette: Farbe kennzeichnet Zustaende (Fokus, niedrige
-   Konfidenz, Fehler), nichts sonst. Die Tabelle traegt die Oberflaeche, nicht
-   das Farbschema.
+/* Die Token aus dem Mockup, 1:1. Das ist die Palette der Vorlage
+   (Swiss TPH Expenses) und damit die einzige Wahrheit fuer Farben - keine
+   zweite Skala daneben.
 
-   `@theme inline` mit Verweis auf normale Custom Properties, nicht zwei
-   @theme-Bloecke: @theme darf in Tailwind v4 nicht in einer Media Query
-   stehen. Umgeschaltet wird deshalb unten auf :root. */
+   Nur Hell: die Vorlage definiert `color-scheme: light` und kein dunkles
+   Gegenstueck. Ein selbst erfundener Dunkelmodus waere eine Design-
+   Entscheidung, die niemand getroffen hat.
+
+   `@theme inline` mit Verweis auf normale Custom Properties, damit dieselben
+   Variablen auch in Inline-Styles benutzbar bleiben - die Vorlage arbeitet
+   durchgehend mit var(--...). */
 @theme inline {
   --color-bg: var(--bg);
   --color-surface: var(--surface);
-  --color-surface-2: var(--surface-2);
-  --color-fg: var(--fg);
-  --color-fg-muted: var(--fg-muted);
-  --color-fg-subtle: var(--fg-subtle);
+  --color-panel: var(--panel);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
   --color-line: var(--line);
-  --color-line-strong: var(--line-strong);
-  --color-accent: var(--accent);
+  --color-line-2: var(--line-2);
+  --color-brand: var(--brand);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-deep: var(--brand-deep);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
   --color-warn: var(--warn);
-  --color-danger: var(--danger);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-deep: var(--warn-deep);
+  --color-warn-deep-strong: var(--warn-deep-strong);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-bad-deep: var(--bad-deep);
 
-  /* System-Font-Stack statt next/font/google: der Container-Build soll ohne
-     Netzwerkzugriff auf fonts.googleapis.com durchlaufen. Die Tabellenoptik
-     kommt aus tabular-nums, nicht aus der Schriftwahl. */
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
-    "Noto Sans", sans-serif;
+  /* Inter wie in der Vorlage, aber NICHT von fonts.googleapis.com geladen:
+     der Container-Build soll ohne Netzwerkzugriff durchlaufen. Wer Inter
+     installiert hat, sieht Inter; sonst uebernimmt system-ui. Die
+     Tabellenoptik haengt an tabular-nums, nicht an der Schriftwahl. */
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono:
     ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
-  --bg: oklch(0.995 0 0);
-  --surface: oklch(1 0 0);
-  --surface-2: oklch(0.975 0.001 286);
-  --fg: oklch(0.19 0.005 286);
-  --fg-muted: oklch(0.52 0.012 286);
-  --fg-subtle: oklch(0.66 0.01 286);
-  --line: oklch(0.915 0.003 286);
-  --line-strong: oklch(0.84 0.005 286);
-  --accent: oklch(0.53 0.16 258);
-  --warn: oklch(0.62 0.14 62);
-  --danger: oklch(0.55 0.2 25);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: oklch(0.165 0.004 286);
-    --surface: oklch(0.196 0.005 286);
-    --surface-2: oklch(0.235 0.006 286);
-    --fg: oklch(0.96 0 0);
-    --fg-muted: oklch(0.72 0.012 286);
-    --fg-subtle: oklch(0.58 0.012 286);
-    --line: oklch(0.29 0.006 286);
-    --line-strong: oklch(0.38 0.008 286);
-    --accent: oklch(0.72 0.13 253);
-    --warn: oklch(0.78 0.13 68);
-    --danger: oklch(0.7 0.17 24);
-  }
+  --bg: oklch(0.94 0.005 250);
+  --surface: oklch(0.96 0.005 250);
+  --panel: #ffffff;
+  --ink: oklch(0.22 0.012 250);
+  --ink-2: oklch(0.45 0.012 250);
+  --ink-3: oklch(0.62 0.01 250);
+  --line: oklch(0.92 0.006 250);
+  --line-2: oklch(0.86 0.008 250);
+  --focus-ring: oklch(0.55 0.2 283);
+  --brand: oklch(0.4 0.19 283);
+  --brand-soft: oklch(0.94 0.04 283);
+  --brand-deep: oklch(0.28 0.17 283);
+  --brand-active: oklch(0.22 0.16 283);
+  --ok: oklch(0.66 0.14 152);
+  --ok-deep: oklch(0.5 0.13 152);
+  --ok-soft: oklch(0.94 0.05 152);
+  --warn: oklch(0.78 0.15 78);
+  --warn-deep: oklch(0.58 0.15 65);
+  --warn-deep-strong: oklch(0.55 0.15 65);
+  --warn-soft: oklch(0.96 0.06 85);
+  --bad: oklch(0.62 0.18 28);
+  --bad-soft: oklch(0.96 0.05 28);
+  --bad-deep: oklch(0.48 0.18 28);
 }
 
 @layer base {
   body {
     background-color: var(--bg);
-    color: var(--fg);
+    color: var(--ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
 
   /* Ein sichtbarer Fokusring ueberall, nicht nur dort, wo daran gedacht wurde.
-     Die Oberflaeche wird mit Tab bedient: Spaltenkoepfe, Filter, Paginierung
-     und Detaillinks sind alle fokussierbar. */
+     Die Oberflaeche wird mit Tab bedient: Navigation, Filter, Tabellenzeilen,
+     Paginierung und die beiden Auswahlfelder im Detail. */
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
     border-radius: 2px;
   }

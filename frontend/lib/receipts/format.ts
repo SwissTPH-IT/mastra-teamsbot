@@ -7,39 +7,40 @@
 // UTC-Mitternacht gelesen und in Europe/Zurich zu 01:00 desselben Tags, im
 // Sommer zu 02:00, und bei einer Zone westlich von UTC zum Vortag. Deshalb
 // zwei getrennte Formatierer.
+//
+// Zahlenformat ist de-CH wie in der Vorlage (Tausender-Apostroph, Punkt als
+// Dezimaltrenner) - unabhaengig davon, dass die Oberflaechentexte englisch
+// sind. Ein Schweizer Beleg mit US-Formatierung liest sich falsch.
 
-const AMOUNT_FORMATTERS = new Map<string, Intl.NumberFormat>();
-
-/** de-CH: Tausender-Apostroph, Punkt als Dezimaltrenner. */
-function amountFormatter(currency: string | null): Intl.NumberFormat {
-  const key = currency ?? "";
-  let formatter = AMOUNT_FORMATTERS.get(key);
-  if (!formatter) {
-    formatter = new Intl.NumberFormat("de-CH", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-      ...(currency
-        ? { style: "currency" as const, currency, currencyDisplay: "code" as const }
-        : {}),
-    });
-    AMOUNT_FORMATTERS.set(key, formatter);
-  }
-  return formatter;
-}
+const AMOUNT_FORMATTER = new Intl.NumberFormat("de-CH", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
 /**
- * Betrag mit Waehrung.
+ * Betrag ohne Waehrung - fuer die Betragsspalte, die ihre Waehrung im
+ * Spaltenkopf bzw. in der Kennzahl daneben traegt.
  *
- * `value` kommt als String aus der Datenbank: node-postgres parst `numeric`
- * absichtlich nicht, weil ein double den Wert nicht exakt halten kann. Der
- * Number() hier ist nur fuer die Anzeige - fuer den Export bleibt der String
+ * `value` kommt als String aus dem Dienst: `numeric` wird absichtlich nicht als
+ * Zahl geparst, weil ein double den Wert nicht exakt halten kann. Das Number()
+ * hier ist nur fuer die Anzeige - fuer den Export bleibt der String
  * unangetastet (siehe lib/export/csv.ts).
  */
-export function formatAmount(value: string | null, currency: string | null): string | null {
+export function formatAmount(value: string | null): string | null {
   if (value === null) return null;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return value;
-  return amountFormatter(currency).format(numeric);
+  return AMOUNT_FORMATTER.format(numeric);
+}
+
+/** Betrag mit Waehrungscode davor, z. B. "CHF 31.50". */
+export function formatAmountWithCurrency(
+  value: string | null,
+  currency: string | null,
+): string | null {
+  const amount = formatAmount(value);
+  if (amount === null) return null;
+  return currency ? `${currency} ${amount}` : amount;
 }
 
 /** Prozentsatz, z. B. "8.100" -> "8.1 %". */
@@ -72,13 +73,62 @@ const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("de-CH", {
   minute: "2-digit",
 });
 
-/** Erfassungszeitpunkt (`timestamptz`), angezeigt in Europe/Zurich. */
-export function formatTimestamp(value: Date | null): string | null {
+/**
+ * Erfassungszeitpunkt, angezeigt in Europe/Zurich.
+ *
+ * Der Dienst liefert ISO-8601 mit Zone (toISOString), also einen echten
+ * Zeitpunkt - hier ist die Konvertierung richtig und beim Belegdatum falsch.
+ */
+export function formatTimestamp(value: string | null): string | null {
   if (!value) return null;
-  return TIMESTAMP_FORMATTER.format(value);
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return TIMESTAMP_FORMATTER.format(parsed);
 }
 
-/** ISO-Datum fuer <input type="date"> und Dateinamen. */
+const WEEKDAY_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/Zurich",
+  weekday: "long",
+});
+
+/** "Thursday, 17.09.2026" - die Zeile unter der Begruessung auf der Startseite. */
+export function formatToday(now = new Date()): string {
+  const day = new Intl.DateTimeFormat("de-CH", {
+    timeZone: "Europe/Zurich",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(now);
+  return `${WEEKDAY_FORMATTER.format(now)}, ${day}`;
+}
+
+/**
+ * Die Tageszeit-Begruessung aus der Vorlage.
+ *
+ * Nach Schweizer Zeit, nicht nach der Zone des Servers: "Good morning" um
+ * 23 Uhr waere eine kleine, aber sichere Irritation.
+ */
+export function greeting(now = new Date()): string {
+  const hour = Number(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/Zurich",
+      hour: "2-digit",
+      hour12: false,
+    }).format(now),
+  );
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+/** Initialen fuer das Avatar-Rund in der Seitenleiste. */
+export function initials(name: string | null | undefined): string {
+  if (!name) return "?";
+  const parts = name.trim().split(/\s+/).slice(0, 2);
+  return parts.map((part) => part[0]?.toUpperCase() ?? "").join("") || "?";
+}
+
+/** ISO-Datum fuer Dateinamen. */
 export function toIsoDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
