@@ -405,9 +405,20 @@ message.author.userId
 In **keinem** `inputSchema` eines Tools steht eine `userId` – das Modell kann sie
 also nicht setzen. Sie reist als `X-Subject-User` zum API-Dienst; dass der Agent
 dieses Subject frei setzen darf, ist der Kern des Vertrauensmodells: er nimmt es
-aus einem signierten Payload, nie aus Modell-Output. Ein *Nutzertoken* (Entra)
-kann den Header dagegen nicht setzen – dort kommt das Subject aus `oid` und der
-Zuordnung in `app.users`. Jede Repository-Funktion nimmt die `userId` als erstes Pflichtargument
+aus einem signierten Payload, nie aus Modell-Output.
+
+Wer wem gegenüber wie auftritt, entscheidet `api/src/auth.ts`:
+
+| Aufrufer | Nachweis | Subject |
+|---|---|---|
+| Agent | Service-Token | `X-Subject-User` (Teams-ID), frei wählbar |
+| Weboberfläche | Service-Token | `X-Subject-Aad` (Entra-`oid`), von der API aufgelöst |
+| Nutzer direkt | Entra-JWT | `oid` **aus dem Token**; Subject-Header werden ignoriert |
+
+Der Unterschied zwischen Zeile 1 und 2 ist Absicht: die Oberfläche kennt nach
+dem Login nur die `oid` und soll die Teams-ID gar nicht kennen – wem ein Beleg
+gehört, entscheidet das System (`app.users`), nicht der Aufrufer. Kein Treffer
+dort heisst „darf nichts sehen", nicht „darf alles sehen". Jede Repository-Funktion nimmt die `userId` als erstes Pflichtargument
 und hängt sie an jedes `WHERE`, auch bei `updateReceipt`: eine fremde `receiptId`
 trifft dadurch 0 Zeilen statt einer fremden Zeile. Bittet ein Nutzer den Agenten
 um die Belege eines Kollegen, ist das keine Frage der Zurückhaltung des Modells –

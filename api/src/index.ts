@@ -38,7 +38,10 @@ const audit: MiddlewareHandler<Env> = async (c, next) => {
   await next();
   const auth = c.get('auth');
   if (!auth) return;
-  const actor = auth.actor.kind === 'service' ? auth.actor.name : `user:${auth.actor.aadObjectId}`;
+  const actor =
+    auth.actor.kind === 'service'
+      ? auth.actor.name
+      : `${auth.actor.kind}:${auth.actor.aadObjectId}`;
   console.log(
     `[api] ${c.req.method} ${c.req.path} -> ${c.res.status} actor=${actor} subject=${auth.subject}`,
   );
