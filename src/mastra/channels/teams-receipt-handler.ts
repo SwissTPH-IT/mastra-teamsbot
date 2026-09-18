@@ -29,6 +29,7 @@ import {
   getPendingReview,
   openPendingReview,
 } from '../../db/receipts';
+import { upsertIdentity, type ConversationRef } from '../../db/users';
 import {
   ALLOWED_UPLOAD_TYPES,
   MAX_UPLOAD_BYTES,
@@ -36,6 +37,63 @@ import {
   resolveUploadPath,
   storeUpload,
 } from '../receipts/upload-store';
+
+/**
+ * Die Felder der Bot-Framework-Activity, die wir lesen.
+ *
+ * `message.raw` ist der vom Chat-SDK durchgereichte Rohpayload und als
+ * `unknown` typisiert – beim Teams-Adapter ist das die Activity. Bewusst ein
+ * enger Typ statt `any`: so fällt ein Tippfehler im Feldnamen beim Kompilieren
+ * auf, und es ist dokumentiert, worauf wir uns überhaupt verlassen.
+ *
+ * Alles optional, weil nicht jede Activity alles mitbringt: bei Gast- und
+ * Anonym-Konten fehlt die aadObjectId, und nicht jeder Kanaltyp füllt
+ * channelData.
+ */
+type TeamsActivity = {
+  from?: { id?: string; name?: string; aadObjectId?: string };
+  conversation?: { id?: string; conversationType?: string; tenantId?: string };
+  recipient?: { id?: string; name?: string };
+  channelData?: { tenant?: { id?: string } };
+  serviceUrl?: string;
+  channelId?: string;
+};
+
+/**
+ * Identität aus der Activity lösen.
+ *
+ * Die Tenant-ID steht je nach Activity-Typ unter `channelData.tenant.id` oder
+ * `conversation.tenantId` – beide prüfen ist billiger als sich auf eine zu
+ * verlassen.
+ */
+function readIdentity(
+  raw: unknown,
+  userId: string,
+  fullName?: string,
+): {
+  teamsUserId: string;
+  aadObjectId: string | null;
+  tenantId: string | null;
+  displayName: string | null;
+  conversationRef: ConversationRef | null;
+} {
+  const activity = raw as TeamsActivity | undefined;
+
+  return {
+    teamsUserId: userId,
+    aadObjectId: activity?.from?.aadObjectId ?? null,
+    tenantId: activity?.channelData?.tenant?.id ?? activity?.conversation?.tenantId ?? null,
+    displayName: fullName ?? activity?.from?.name ?? null,
+    conversationRef: activity
+      ? {
+          conversationId: activity.conversation?.id,
+          serviceUrl: activity.serviceUrl,
+          channelId: activity.channelId,
+          recipient: activity.recipient,
+        }
+      : null,
+  };
+}
 
 /**
  * Anhänge, die als Beleg in Frage kommen.
@@ -194,6 +252,25 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
         .join(', ')}`,
     );
   }
+
+  // Identität festhalten, bei jeder Nachricht und nicht erst beim Beleg:
+  // aadObjectId und Conversation Reference stehen nur in DIESER Activity.
+  // Ohne die erste ist ein späterer Browser-Login diesem Nutzer nicht
+  // zuzuordnen, ohne die zweite kann ihn keine proaktive Nachricht erreichen.
+  //
+  // Bewusst nicht blockierend: ein fehlgeschlagener Upsert darf einen Beleg
+  // nicht verhindern. Die Identität wird bei der nächsten Nachricht ohnehin
+  // wieder mitgeschickt.
+  const identity = readIdentity(message.raw, userId, message.author.fullName);
+  try {
+    await upsertIdentity(identity);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    logger?.warn(`[teams] Identität für ${userId} nicht gespeichert: ${reason}`);
+  }
+  logger?.debug(
+    `[teams] Identität: aad=${identity.aadObjectId ?? 'fehlt'} tenant=${identity.tenantId ?? 'fehlt'}`,
+  );
 
   /* ---------- Fall 1: Antwort auf eine offene Vorlage ---------- */
 

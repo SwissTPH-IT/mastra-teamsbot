@@ -106,6 +106,47 @@ export const receipts = appSchema.table(
 );
 
 /**
+ * Die Identität hinter einer Teams-userId.
+ *
+ * `teams_user_id` ist dieselbe ID wie `receipts.user_id` – sie kommt aus dem
+ * signierten Bot-Framework-Payload. `aad_object_id` ist die Entra-Identität
+ * desselben Menschen und damit die Brücke zu einem späteren Browser-Login:
+ * ein Token liefert `oid`, die Belege hängen an der Teams-ID, und ohne diese
+ * Tabelle gibt es zwischen beiden keine Verbindung.
+ *
+ * Beides steht ausschliesslich in der eingehenden Teams-Activity. Wird es dort
+ * nicht mitgenommen, ist es nachträglich nicht rekonstruierbar – deshalb
+ * schreibt der Teams-Handler bei JEDER Nachricht hierher, nicht erst bei einem
+ * Beleg.
+ */
+export const users = appSchema.table(
+  'users',
+  {
+    teamsUserId: text('teams_user_id').primaryKey(),
+
+    /** Entra Object ID (`oid`). NULL, solange Teams sie nicht mitliefert. */
+    aadObjectId: text('aad_object_id'),
+    tenantId: text('tenant_id'),
+    displayName: text('display_name'),
+
+    /**
+     * Was eine proaktive Nachricht braucht: conversationId, serviceUrl,
+     * channelId und der Bot selbst. Eine Erinnerung ist keine Antwort auf eine
+     * eingehende Activity – ohne diese Referenz gibt es keinen Adressaten.
+     */
+    conversationRef: jsonb('conversation_ref'),
+
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    // Eine Entra-Identität gehört zu genau einer Teams-ID. Mehrere NULL sind
+    // in Postgres erlaubt, unbekannte Identitäten kollidieren also nicht.
+    uniqueIndex('users_aad_object_id_key').on(table.aadObjectId),
+  ],
+);
+
+/**
  * Zeiger von einem Teams-Thread auf den suspendierten Workflow-Run.
  *
  * Bewusst NUR ein Zeiger: der Kandidatensatz liegt im Workflow-State und damit
@@ -123,6 +164,7 @@ export const pendingReviews = appSchema.table('pending_reviews', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export type UserRow = typeof users.$inferSelect;
 export type ReceiptRow = typeof receipts.$inferSelect;
 export type NewReceiptRow = typeof receipts.$inferInsert;
 export type PendingReviewRow = typeof pendingReviews.$inferSelect;
