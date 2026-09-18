@@ -10,12 +10,14 @@
 
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { logger as requestLogger } from 'hono/logger';
 import { sql } from 'drizzle-orm';
 import { db } from 'mastra-teamsbot/db';
 import { closePool } from 'mastra-teamsbot/db/pool';
 import { authenticate, type AuthState } from './auth';
+import { identityRoutes } from './routes/identity';
 import { receiptRoutes } from './routes/receipts';
 
 type Env = { Variables: { auth: AuthState } };
@@ -32,7 +34,7 @@ app.use('*', requestLogger());
  * Voraussetzung dafuer, spaeter von Service-Token auf echte Nutzertoken
  * (On-Behalf-Of) zu wechseln, ohne die Endpunkte anzufassen.
  */
-app.use('/receipts/*', authenticate, async (c, next) => {
+const audit: MiddlewareHandler<Env> = async (c, next) => {
   await next();
   const auth = c.get('auth');
   if (!auth) return;
@@ -40,9 +42,18 @@ app.use('/receipts/*', authenticate, async (c, next) => {
   console.log(
     `[api] ${c.req.method} ${c.req.path} -> ${c.res.status} actor=${actor} subject=${auth.subject}`,
   );
-});
+};
+
+// Je Pfad einzeln registriert: app.use() nimmt genau EIN Pfadmuster, eine
+// Liste wird als Handler interpretiert und scheitert zur Laufzeit mit
+// "handler is not a function". Und '/identity/*' trifft '/identity' nicht mit,
+// deshalb beide.
+app.use('/receipts/*', authenticate, audit);
+app.use('/identity', authenticate, audit);
+app.use('/identity/*', authenticate, audit);
 
 app.route('/receipts', receiptRoutes);
+app.route('/identity', identityRoutes);
 
 /**
  * /healthz, nicht /health – gleiche Namenswahl wie beim Agenten, damit beide

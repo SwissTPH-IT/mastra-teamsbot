@@ -1,12 +1,19 @@
 # Belegerfassung – Mastra + Microsoft Teams, vollständig in Docker
 
-Drei Container, ein `docker compose up`:
+Vier Container, ein `docker compose up`:
 
 | Service | Port | Was drin läuft |
 |---|---|---|
 | `postgres` | 5432 | Postgres 17: Schema `mastra` (von Mastra verwaltet) und Schema `app` (Fachdaten) |
 | `mastra` | 4111 | Mastra-Server: Agenten, Workflows, Teams-Webhook, Upload-Endpunkte, Studio-UI |
+| `api` | 4000 | Hono: Eigentümer von `app.*`. Der Agent schreibt und liest Belege nur hierüber |
 | `frontend` | 3000 | Next.js: die Weboberfläche auf die erfassten Belegdaten |
+
+Die Trennung zwischen `mastra` und `api` ist Absicht: der Agent kann nur, was der
+Dienst als Endpunkt anbietet – ein Fehler in einem Tool oder eine kreative Idee
+des Modells kann keine Query ausführen, die es nicht gibt. Das Schema `mastra`
+(Snapshots, Memory, Traces) bleibt dagegen direkt am Agenten, weil
+`PostgresStore` eine eigene Verbindung braucht.
 
 **Zwei Zugänge mit zwei Zielgruppen** – und der Unterschied prägt das Datenmodell:
 
@@ -390,11 +397,17 @@ message.author.userId
        ├─ run.start({ requestContext })        → Workflow-Steps
        └─ defaultHandler(...)                  → Agent → Tools
             └─ requireUserId(ctx)              src/mastra/tools/tool-context.ts
-                 └─ listReceipts(userId, …)    src/db/receipts.ts
+                 └─ X-Subject-User: <userId>   src/mastra/api-client.ts
+                      └─ subjectOf(c)          api/src/auth.ts
+                           └─ listReceipts(userId, …)   src/db/receipts.ts
 ```
 
 In **keinem** `inputSchema` eines Tools steht eine `userId` – das Modell kann sie
-also nicht setzen. Jede Repository-Funktion nimmt sie als erstes Pflichtargument
+also nicht setzen. Sie reist als `X-Subject-User` zum API-Dienst; dass der Agent
+dieses Subject frei setzen darf, ist der Kern des Vertrauensmodells: er nimmt es
+aus einem signierten Payload, nie aus Modell-Output. Ein *Nutzertoken* (Entra)
+kann den Header dagegen nicht setzen – dort kommt das Subject aus `oid` und der
+Zuordnung in `app.users`. Jede Repository-Funktion nimmt die `userId` als erstes Pflichtargument
 und hängt sie an jedes `WHERE`, auch bei `updateReceipt`: eine fremde `receiptId`
 trifft dadurch 0 Zeilen statt einer fremden Zeile. Bittet ein Nutzer den Agenten
 um die Belege eines Kollegen, ist das keine Frage der Zurückhaltung des Modells –
@@ -412,9 +425,24 @@ ausführt.
 | `search-receipts` | Suche nach Händler, Kategorie, Belegart, Referenznummer; Zeitraum und Betragsspanne optional. |
 | `update-receipt` | Korrektur an einem bereits gespeicherten Beleg. |
 
-Fachdaten laufen ausschliesslich über Drizzle. `store.db` / `store.pool` werden
-nicht angefasst – die Referenz bezeichnet den Direktzugriff ausdrücklich als
-Umgehung der Storage-Logik für Low-Level-Sonderfälle.
+Die Tools sprechen **nicht** mehr selbst mit der Datenbank: sie rufen den
+API-Dienst über `src/mastra/api-client.ts`. Die Ein- und Ausgabeschemas sind
+dieselben wie vorher, das Verhalten für den Nutzer ist identisch. Was sich ändert,
+ist die Reichweite eines Fehlers – vorher war der volle Drizzle-Client eine
+Funktion entfernt.
+
+| Endpunkt | benutzt von |
+|---|---|
+| `POST /receipts` | `create-receipt`, und der Schritt `persist-receipt` im Review-Workflow |
+| `GET /receipts` | `list-receipts` (ohne `q`), `search-receipts` (mit `q`) |
+| `PATCH /receipts/:id` | `update-receipt` |
+| `PUT /identity` | der Teams-Handler, bei jeder Nachricht |
+
+Direkt über Drizzle laufen im Agenten nur noch zwei Dinge, beide bewusst:
+`app.pending_reviews` (der Zeiger Thread → Run, Zustand des Review-Vorgangs) und
+das Schema `mastra` über `PostgresStore`. `store.db` / `store.pool` werden nicht
+angefasst – die Referenz bezeichnet den Direktzugriff ausdrücklich als Umgehung
+der Storage-Logik für Low-Level-Sonderfälle.
 
 ### Extraktion an genau einer Stelle
 
@@ -454,16 +482,22 @@ Railway-Projekt
     └── … dieselben vier, eigene Datenbank
 ```
 
-| | `mastra-agent` | `mastra-prune` | `receipt-frontend` |
-|---|---|---|---|
-| Dockerfile | `Dockerfile` | `Dockerfile` | `frontend/Dockerfile` |
-| Rolle | `RUN_MODE` ungesetzt | `RUN_MODE=prune` | – |
-| Start | migrieren, dann Server | `scripts/prune.mjs`, terminiert | Next-Server |
-| Migrationen | ja, im `ENTRYPOINT` | – | **nein** |
-| Health-Check | `/healthz` | – | `/api/healthz` |
-| Cron | – | `0 3 * * *` | – |
-| Volume | `/app/data` | – | – |
-| `DATABASE_URL` | Referenz auf `Postgres` | dieselbe Referenz | dieselbe Referenz |
+| | `mastra-agent` | `receipt-api` | `mastra-prune` | `receipt-frontend` |
+|---|---|---|---|---|
+| Dockerfile | `Dockerfile` | `api/Dockerfile` | `Dockerfile` | `frontend/Dockerfile` |
+| Rolle | `RUN_MODE` ungesetzt | – | `RUN_MODE=prune` | – |
+| Start | migrieren, dann Server | Hono-Server | `scripts/prune.mjs`, terminiert | Next-Server |
+| Migrationen | ja, im `ENTRYPOINT` | **nein** | – | **nein** |
+| Health-Check | `/healthz` | `/healthz` | – | `/api/healthz` |
+| Cron | – | – | `0 3 * * *` | – |
+| Volume | `/app/data` | – | – | – |
+| `DATABASE_URL` | Referenz auf `Postgres` | dieselbe Referenz | dieselbe Referenz | dieselbe Referenz |
+| Pool (`*_POOL_MAX`) | 8 | 5 | 2 | 3 |
+
+Zusätzlich braucht es **ein** Geheimnis an zwei Stellen: `API_SERVICE_TOKEN`, am
+Agenten und am API-Dienst identisch (`openssl rand -base64 48`). Ohne ihn startet
+`receipt-api` nicht, und der Agent bekommt bei jedem Beleg `401`. `API_URL` setzt
+die IaC selbst aus dem privaten Hostnamen des Dienstes.
 
 Definiert ist das alles in **einer** Datei: `.railway/railway.ts`. Die frühere
 `railway.json`-Variante ist für neue Services nicht mehr verfügbar – warum, steht
