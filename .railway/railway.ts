@@ -30,6 +30,25 @@ export default defineRailway(() => {
   const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
   const mastraTeamsbotVolume8j43 = volume("mastra-teamsbot-volume-8j43", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
 
+  // Der Fachdaten-Dienst: Eigentuemer von app.*. Dasselbe Repo, unterschieden
+  // allein durch dockerfilePath. Kein Volume - er haelt keine Dateien.
+  const receiptApi = service("receipt-api", {
+    source: github(REPO, { checkSuites: false }),
+    build: { builder: "DOCKERFILE", dockerfilePath: "api/Dockerfile" },
+    deploy: { healthcheckPath: "/healthz", healthcheckTimeout: 60, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
+    replicas: { [REGION]: 1 },
+    env: {
+      DATABASE_URL: Postgres.env.DATABASE_URL,
+      DB_POOL_MAX: "5",
+      // Das gemeinsame Geheimnis mit dem Agenten. preserve(): nie im Repo.
+      API_SERVICE_TOKEN: preserve(),
+      // Ohne diese zwei funktioniert nur der Service-Weg (Agent); Nutzertoken
+      // werden mit 401 abgewiesen und der Grund landet im Log.
+      ENTRA_TENANT_ID: preserve(),
+      ENTRA_API_AUDIENCE: preserve(),
+    },
+  });
+
   // Build und Deploy stehen hier, weil railway.json geloescht wird. Ohne
   // `builder: DOCKERFILE` wuerde Railway den Builder wieder selbst raten.
   //
@@ -44,7 +63,12 @@ export default defineRailway(() => {
     deploy: { healthcheckPath: "/healthz", healthcheckTimeout: 180, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
     replicas: { [REGION]: 1 },
     volumeMounts: { "/app/data": mastraTeamsbotVolume8j43 },
-    env: { DATABASE_URL: preserve(), MASTRA_MODEL: preserve(), MASTRA_TELEMETRY_DISABLED: preserve(), OPENROUTER_API_KEY: preserve(), TEAMS_APP_ID: preserve(), TEAMS_APP_PASSWORD: preserve(), TEAMS_APP_TENANT_ID: preserve() },
+    env: { DATABASE_URL: preserve(), MASTRA_MODEL: preserve(), MASTRA_TELEMETRY_DISABLED: preserve(), OPENROUTER_API_KEY: preserve(), TEAMS_APP_ID: preserve(), TEAMS_APP_PASSWORD: preserve(), TEAMS_APP_TENANT_ID: preserve(),
+      // Fachdaten laufen ueber den API-Dienst. Literal mit Railways
+      // ${{...}}-Syntax, weil hier ein Wert zusammengesetzt wird - ein
+      // Referenz-Objekt liesse sich darin nicht interpolieren.
+      API_URL: `http://\${{${receiptApi.name}.RAILWAY_PRIVATE_DOMAIN}}:4000`,
+      API_SERVICE_TOKEN: preserve() },
   });
 
   // Die Weboberflaeche: dasselbe Repo, unterschieden allein durch
@@ -67,6 +91,6 @@ export default defineRailway(() => {
   });
 
   return project("agent-framework", {
-    resources: [mastraAgent, receiptFrontend, Postgres, postgresVolume, mastraTeamsbotVolume8j43],
+    resources: [mastraAgent, receiptApi, receiptFrontend, Postgres, postgresVolume, mastraTeamsbotVolume8j43],
   });
 });

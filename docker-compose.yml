@@ -42,6 +42,10 @@ services:
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       # Erlaubt dem Browser den direkten Weg zu Mastra (siehe README, Variante B).
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      # Fachdaten laufen ueber den API-Dienst, nicht mehr direkt ueber Drizzle.
+      # Servicename statt localhost: der Aufruf passiert im Compose-Netz.
+      API_URL: http://api:4000
+      API_SERVICE_TOKEN: ${API_SERVICE_TOKEN:-lokaler-test-token-mindestens-32-zeichen-lang}
     volumes:
       # Persistiert die hochgeladenen Belege und die erzeugten JSON-Dateien.
       # Threads, Memory, Traces und Workflow-Snapshots liegen jetzt in Postgres.
@@ -60,6 +64,38 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+
+  api:
+    # Kontext ist das Repo-Root, nicht ./api: der Dienst ist ein npm-Workspace
+    # dieses Repos und importiert Schema und Repository aus src/db.
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: receipt-api
+    ports:
+      - "4000:4000"
+    environment:
+      # Dieselbe Instanz wie der Agent, eigener kleiner Pool. Der Dienst
+      # migriert nichts - das macht der Agent-Service beim Start.
+      DATABASE_URL: postgres://mastra:mastra@postgres:5432/mastra
+      DB_POOL_MAX: 5
+      # Lokal ein fester Wert, auf Railway ein Secret. Der Agent muss denselben
+      # benutzen, sonst bekommt er 401.
+      API_SERVICE_TOKEN: ${API_SERVICE_TOKEN:-lokaler-test-token-mindestens-32-zeichen-lang}
+      # Ohne diese zwei funktioniert nur der Service-Weg; Nutzertoken werden
+      # dann mit 401 abgewiesen (und der Grund steht im Log).
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
+      ENTRA_API_AUDIENCE: ${ENTRA_API_AUDIENCE:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     restart: unless-stopped
 
   frontend:

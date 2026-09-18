@@ -1,0 +1,27 @@
+{
+  "name": "receipt-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.4",
+    "@hono/zod-validator": "^0.7.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.7.11",
+    "jose": "^6.0.11",
+    "mastra-teamsbot": "file:..",
+    "pg": "^8.23.0",
+    "zod": "^3.25.76",
+    "tsx": "^4.20.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/pg": "^8.23.1",
+    "typescript": "^5.9.3"
+  }
+}

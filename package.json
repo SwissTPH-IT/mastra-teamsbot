@@ -4,10 +4,16 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "frontend"
+    "frontend",
+    "api"
   ],
   "exports": {
-    "./db/schema": "./src/db/schema.ts"
+    "./db/schema": "./src/db/schema.ts",
+    "./db/receipts": "./src/db/receipts.ts",
+    "./db/users": "./src/db/users.ts",
+    "./db/pool": "./src/db/pool.ts",
+    "./db": "./src/db/index.ts",
+    "./receipts/candidate": "./src/mastra/receipts/candidate.ts"
   },
   "scripts": {
     "dev": "mastra dev",

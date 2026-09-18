@@ -12,6 +12,7 @@ WORKDIR /repo
 # Mitglieds, sonst bricht es gegen das Lockfile ab.
 COPY package.json package-lock.json ./
 COPY frontend/package.json ./frontend/
+COPY api/package.json ./api/
 RUN npm ci
 
 # Nur das DB-Verzeichnis aus dem Agent-Repo, nicht src/ komplett: mehr braucht

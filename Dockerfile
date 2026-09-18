@@ -16,6 +16,7 @@ ENV MASTRA_TELEMETRY_DISABLED=1
 # der Agent-Build zieht keine React-/Next-Pakete mit.
 COPY package.json package-lock.json ./
 COPY frontend/package.json ./frontend/
+COPY api/package.json ./api/
 RUN npm ci --workspaces=false
 
 COPY tsconfig.json ./
