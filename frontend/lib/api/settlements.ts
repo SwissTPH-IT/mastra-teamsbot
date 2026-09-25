@@ -15,9 +15,24 @@ import type { ApiReceipt, CurrencySummary } from "./receipts";
  */
 export type SettlementStatus = "draft" | "submitted";
 
+/**
+ * Die Summe in der Abrechnungswaehrung. Jede Position zum Kurs ihres
+ * Belegdatums umgerechnet (Frankfurter), gerechnet im Dienst.
+ */
+export type SettlementTotal = {
+  currency: string;
+  sum: string;
+  /** Positionen ohne umgerechneten Betrag. Solange > 0, ist `sum` zu klein. */
+  missingCount: number;
+  /** Positionen, deren Tageskurs noch nicht feststeht. */
+  provisionalCount: number;
+};
+
 export type ApiSettlement = {
   id: string;
   title: string;
+  /** ISO-4217. Worauf die Abrechnung lautet. */
+  currency: string;
   status: SettlementStatus;
   submittedAt: string | null;
   createdAt: string;
@@ -26,15 +41,31 @@ export type ApiSettlement = {
   /** Fruehestes und spaetestes Belegdatum, YYYY-MM-DD. Gerechnet, nicht gespeichert. */
   periodStart: string | null;
   periodEnd: string | null;
-  /** Je Waehrung. CHF und EUR werden nicht addiert. */
+  total: SettlementTotal;
+  /** Je Originalwaehrung, unumgerechnet. */
   totals: CurrencySummary[];
 };
 
+/** Je Kategorie, in der Abrechnungswaehrung. */
 export type CategoryTotal = CurrencySummary & { category: string | null };
+
+/** Eine Position in der Abrechnungswaehrung. */
+export type Conversion = {
+  /** null: nicht rechenbar, siehe `missing`. */
+  amount: string | null;
+  /** 1 Abrechnungswaehrung = `rate` Belegwaehrung. null bei gleicher Waehrung. */
+  rate: string | null;
+  /** Tag, von dem der Kurs stammt. Kann vor dem Belegdatum liegen. */
+  rateDate: string | null;
+  provisional: boolean;
+  missing: "amount" | "currency" | "date" | "rate" | null;
+};
+
+export type SettlementReceipt = ApiReceipt & { conversion: Conversion };
 
 export type ApiSettlementDetail = ApiSettlement & {
   byCategory: CategoryTotal[];
-  receipts: ApiReceipt[];
+  receipts: SettlementReceipt[];
 };
 
 type One = { settlement: ApiSettlementDetail };
@@ -55,11 +86,24 @@ export async function fetchSettlement(id: string): Promise<ApiSettlementDetail> 
 /** Neue Abrechnung, optional gleich mit Belegen - alles oder nichts. */
 export async function createSettlement(
   title: string,
+  currency: string,
   receiptIds: string[] = [],
 ): Promise<ApiSettlementDetail> {
   const payload = await apiRequest<One>("/settlements", {
     method: "POST",
-    body: receiptIds.length > 0 ? { title, receiptIds } : { title },
+    body: receiptIds.length > 0 ? { title, currency, receiptIds } : { title, currency },
+  });
+  return payload.settlement;
+}
+
+/** Nur im Entwurf. Die Betraege rechnet der Dienst danach neu um. */
+export async function changeSettlementCurrency(
+  settlementId: string,
+  currency: string,
+): Promise<ApiSettlementDetail> {
+  const payload = await apiRequest<One>(`/settlements/${encodeURIComponent(settlementId)}`, {
+    method: "PATCH",
+    body: { currency },
   });
   return payload.settlement;
 }

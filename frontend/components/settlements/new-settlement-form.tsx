@@ -6,6 +6,7 @@
 import { useActionState, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { createEmptySettlement, type ActionState } from "@/app/(app)/settlements/actions";
+import { CurrencySelect } from "./currency-select";
 
 export function NewSettlementForm() {
   const [open, setOpen] = useState(false);
@@ -35,6 +36,7 @@ export function NewSettlementForm() {
         aria-label="Settlement title"
         className="border-line-2 bg-panel text-ink h-10 w-[280px] rounded-[10px] border px-3 text-sm"
       />
+      <CurrencySelect className="border-line-2 bg-panel text-ink h-10 rounded-[10px] border px-2 text-sm" />
       <Create />
       <button
         type="button"

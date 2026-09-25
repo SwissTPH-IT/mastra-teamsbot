@@ -99,6 +99,9 @@ const SETTLEMENT_ERROR_STATUS = {
   // Formal gueltig, fachlich nicht einreichbar.
   empty: 422,
   incomplete: 422,
+  unconverted: 422,
+  // Kein Fehler der Anfrage, sondern "noch nicht": morgen geht dieselbe.
+  'rates-pending': 409,
 } as const;
 
 app.onError((error, c) => {

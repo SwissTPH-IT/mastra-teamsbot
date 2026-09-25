@@ -13,6 +13,7 @@ import { notFound } from "next/navigation";
 import { ServiceUnavailable, UnlinkedAccount } from "@/components/receipts/states";
 import { ReviewBadge } from "@/components/receipts/rows";
 import { ActionButton } from "@/components/settlements/action-button";
+import { CurrencySwitcher } from "@/components/settlements/currency-select";
 import {
   deleteSettlementAction,
   removeFromSettlement,
@@ -20,18 +21,26 @@ import {
 } from "@/app/(app)/settlements/actions";
 import { classifyFailure } from "@/lib/api/guard";
 import { isNotFound } from "@/lib/api/client";
-import { fetchSettlement, type ApiSettlementDetail } from "@/lib/api/settlements";
-import type { ApiReceipt } from "@/lib/api/receipts";
+import {
+  fetchSettlement,
+  type ApiSettlementDetail,
+  type SettlementReceipt,
+} from "@/lib/api/settlements";
 import { categoryLabel } from "@/lib/receipts/categories";
 import { formatAmount, formatReceiptDate } from "@/lib/receipts/format";
 import { needsReview, receiptTitle, sourceLabel } from "@/lib/receipts/review";
 import {
+  MISSING_CONVERSION,
   STATUS_STYLE,
+  conversionNote,
+  formatSettlementTotal,
   formatSubmittedDay,
-  formatTotals,
   itemCount,
   settlementMeta,
 } from "@/lib/settlements/format";
+
+/** Spalten der Positionsliste, fuer Kopf und Zeilen gleich. */
+const COLUMNS = "grid-cols-[88px_minmax(0,1fr)_110px_minmax(150px,auto)_96px]";
 
 export default async function SettlementDetailPage({
   params,
@@ -56,6 +65,17 @@ export default async function SettlementDetailPage({
   const locked = settlement.status === "submitted";
   const style = STATUS_STYLE[settlement.status];
   const withoutType = settlement.receipts.filter((receipt) => !receipt.receiptType).length;
+  const { missingCount, provisionalCount } = settlement.total;
+  const blockedBy =
+    settlement.receiptCount === 0
+      ? "Add items first"
+      : withoutType > 0
+        ? "Every item needs a receipt type"
+        : missingCount > 0
+          ? "Every item needs an amount in the settlement currency"
+          : provisionalCount > 0
+            ? "Some exchange rates are not final yet"
+            : undefined;
 
   return (
     <div className="flex flex-col gap-[22px]">
@@ -77,12 +97,19 @@ export default async function SettlementDetailPage({
             </span>
           </div>
           <div className="text-ink-3 text-[13px]">{settlementMeta(settlement)}</div>
+          {locked ? null : (
+            <CurrencySwitcher settlementId={settlement.id} currency={settlement.currency} />
+          )}
         </div>
         <div className="text-right">
           <div className="tabular text-[28px] font-semibold tracking-[-0.03em]">
-            {formatTotals(settlement.totals)}
+            {formatAmount(settlement.total.sum)} {settlement.currency}
           </div>
-          <div className="text-ink-3 mt-[2px] text-xs">{itemCount(settlement.receiptCount)}</div>
+          <div className="text-ink-3 mt-[2px] text-xs">
+            {itemCount(settlement.receiptCount)}
+            {missingCount > 0 ? ` · ${missingCount} not converted` : ""}
+            {provisionalCount > 0 ? ` · ${provisionalCount} provisional rate` : ""}
+          </div>
         </div>
       </div>
 
@@ -99,12 +126,12 @@ export default async function SettlementDetailPage({
 
       <div className="grid grid-cols-[minmax(0,1fr)_280px] items-start gap-8">
         <div className="border-line bg-panel overflow-hidden rounded-xl border">
-          <div className="border-line grid h-[38px] grid-cols-[88px_minmax(0,1fr)_120px_102px_96px] items-center gap-3 border-b px-4">
-            {["Date", "Item", "Source", "Amount", ""].map((label, index) => (
+          <div className={`border-line grid h-[38px] ${COLUMNS} items-center gap-3 border-b px-4`}>
+            {["Date", "Item", "Source", `Amount ${settlement.currency}`, ""].map((label, index) => (
               <span
                 key={index}
                 className={`text-ink-3 text-[10.5px] font-semibold tracking-[0.08em] uppercase ${
-                  label === "Amount" ? "text-right" : ""
+                  index === 3 ? "text-right" : ""
                 }`}
               >
                 {label}
@@ -125,6 +152,7 @@ export default async function SettlementDetailPage({
                 key={receipt.id}
                 receipt={receipt}
                 settlementId={settlement.id}
+                settlementCurrency={settlement.currency}
                 locked={locked}
               />
             ))
@@ -149,14 +177,8 @@ export default async function SettlementDetailPage({
                 fields={{ settlementId: settlement.id }}
                 label="Submit"
                 pendingLabel="Submitting…"
-                disabled={settlement.receiptCount === 0 || withoutType > 0}
-                title={
-                  settlement.receiptCount === 0
-                    ? "Add items first"
-                    : withoutType > 0
-                      ? "Every item needs a receipt type"
-                      : undefined
-                }
+                disabled={blockedBy !== undefined}
+                title={blockedBy}
                 confirm={`Submit "${settlement.title}"? The settlement is locked afterwards: no new items, no corrections.`}
                 className="bg-brand hover:bg-brand-deep disabled:bg-surface disabled:text-ink-3 h-10 rounded-[10px] px-4 text-[13.5px] font-medium text-white disabled:cursor-not-allowed"
               />
@@ -179,6 +201,24 @@ export default async function SettlementDetailPage({
               <div className="text-warn-deep-strong text-xs leading-[1.55]">
                 {withoutType === 1 ? "1 item has" : `${withoutType} items have`} no receipt type.
                 Set it on the item before submitting.
+              </div>
+            ) : null}
+
+            {!locked && missingCount > 0 ? (
+              <div className="text-warn-deep-strong text-xs leading-[1.55]">
+                {missingCount === 1 ? "1 item has" : `${missingCount} items have`} no amount in{" "}
+                {settlement.currency}: amount, currency or date is missing, or no exchange rate is
+                available for that day. They are not part of the total.
+              </div>
+            ) : null}
+
+            {!locked && provisionalCount > 0 ? (
+              <div className="text-ink-3 text-xs leading-[1.55]">
+                {provisionalCount === 1
+                  ? "1 exchange rate is"
+                  : `${provisionalCount} exchange rates are`}{" "}
+                provisional. The daily rate is fixed one to two days after the receipt date; submit
+                then.
               </div>
             ) : null}
 
@@ -207,18 +247,33 @@ export default async function SettlementDetailPage({
   );
 }
 
+/**
+ * Eine Position. Der Betrag steht in der Abrechnungswaehrung; darunter der
+ * Originalbetrag und der Kurs des Belegdatums, damit nachvollziehbar ist, wie
+ * die Zahl zustande kam.
+ */
 function Position({
   receipt,
   settlementId,
+  settlementCurrency,
   locked,
 }: {
-  receipt: ApiReceipt;
+  receipt: SettlementReceipt;
   settlementId: string;
+  settlementCurrency: string;
   locked: boolean;
 }) {
   const title = receiptTitle(receipt);
+  const { conversion } = receipt;
+  const note = conversionNote(receipt, conversion, settlementCurrency);
+  const rateDay =
+    conversion.rateDate && conversion.rateDate !== receipt.receiptDate
+      ? `Rate of ${formatReceiptDate(conversion.rateDate)}`
+      : undefined;
   return (
-    <div className="border-line grid h-12 grid-cols-[88px_minmax(0,1fr)_120px_102px_96px] items-center gap-3 border-b px-4 last:border-b-0">
+    <div
+      className={`border-line grid min-h-12 ${COLUMNS} items-center gap-3 border-b px-4 py-[7px] last:border-b-0`}
+    >
       <span className="tabular text-ink-3 text-[12.5px]">
         {formatReceiptDate(receipt.receiptDate) ?? "–"}
       </span>
@@ -236,10 +291,28 @@ function Position({
         ) : null}
       </Link>
       <span className="text-ink-3 text-[12.5px]">{sourceLabel(receipt)}</span>
-      <span className="tabular text-right text-sm">
-        {formatAmount(receipt.totalAmount) ?? "–"}
-        {receipt.currency && receipt.currency !== "CHF" ? (
-          <span className="text-ink-3 ml-1 text-xs">{receipt.currency}</span>
+      <span className="flex flex-col items-end gap-px text-right">
+        {conversion.amount !== null ? (
+          <span className="tabular text-sm">
+            {formatAmount(conversion.amount)}
+            {conversion.provisional ? (
+              <span
+                className="text-ink-3 ml-1 text-[11px]"
+                title="Provisional rate - fixed one to two days after the receipt date"
+              >
+                prov.
+              </span>
+            ) : null}
+          </span>
+        ) : (
+          <span className="bg-warn-soft text-warn-deep-strong rounded-full px-[7px] py-px text-[11px]">
+            {conversion.missing ? MISSING_CONVERSION[conversion.missing] : "–"}
+          </span>
+        )}
+        {note ? (
+          <span className="tabular text-ink-3 text-[11px] whitespace-nowrap" title={rateDay}>
+            {note}
+          </span>
         ) : null}
       </span>
       <span className="flex justify-end">
@@ -259,39 +332,34 @@ function Position({
 }
 
 /**
- * "Total per category" aus der Vorlage - je Waehrung getrennt. Eine Kategorie
- * mit CHF- und EUR-Belegen hat zwei Zeilen, nicht eine falsche.
+ * "Total per category" aus der Vorlage - in der Abrechnungswaehrung, eine
+ * Zeile je Kategorie. Positionen ohne umgerechneten Betrag fehlen darin; die
+ * Gesamtzeile sagt dann, wie viele.
  */
 function CategoryTotals({ settlement }: { settlement: ApiSettlementDetail }) {
-  const currencies = new Set(settlement.byCategory.map((entry) => entry.currency));
-  const showCurrency = currencies.size > 1 || !currencies.has("CHF");
-
   return (
     <div className="flex flex-col gap-[9px]">
       <div className="text-ink-3 text-[10.5px] font-semibold tracking-[0.09em] uppercase">
-        Total per category
+        Total per category · {settlement.currency}
       </div>
       {settlement.byCategory.length === 0 ? (
         <div className="text-ink-3 text-[13px]">–</div>
       ) : (
         settlement.byCategory.map((entry) => (
           <div
-            key={`${entry.category ?? ""}-${entry.currency ?? ""}`}
+            key={entry.category ?? ""}
             className="border-line flex items-center justify-between gap-[10px] border-b py-[6px] text-[13px]"
           >
             <span className={entry.category ? "text-ink-2" : "text-ink-3"}>
               {categoryLabel(entry.category)}
             </span>
-            <span className="tabular">
-              {formatAmount(entry.sum)}
-              {showCurrency ? ` ${entry.currency ?? "(no currency)"}` : ""}
-            </span>
+            <span className="tabular">{formatAmount(entry.sum)}</span>
           </div>
         ))
       )}
       <div className="flex items-center justify-between pt-1 text-sm font-semibold">
         <span>Total</span>
-        <span className="tabular text-right">{formatTotals(settlement.totals)}</span>
+        <span className="tabular text-right">{formatSettlementTotal(settlement.total)}</span>
       </div>
     </div>
   );

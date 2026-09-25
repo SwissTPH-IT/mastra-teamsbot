@@ -318,14 +318,31 @@ Statement, in dem er schreibt:
   gesperrt), wird keiner zugeordnet.
 - Zwischen Entwürfen dürfen Belege wandern, aus einer eingereichten Abrechnung
   heraus nicht.
-- **Submit** geht nur mit mindestens einem Beleg und mit Belegart an jedem.
+- **Submit** geht nur mit mindestens einem Beleg, mit Belegart an jedem und
+  mit festem Kurs für jede Position (siehe „Währung" unten).
   Danach ist die Abrechnung gesperrt: keine Positionen hinzu oder weg, keine
   Korrekturen, kein neuer Titel, kein Löschen.
 - Einen Entwurf zu löschen lässt die Belege stehen; sie sind danach wieder frei.
 
+**Währung.** Eine Abrechnung lautet auf eine Währung, gewählt beim Anlegen
+(„New settlement" und im Zuordnungsdialog, vorausgewählt CHF) und im Entwurf
+oben auf der Detailseite änderbar. Jede Position steht in dieser Währung,
+umgerechnet zum Kurs ihres Belegdatums; darunter klein der Originalbetrag und
+der Kurs („EUR 100.00 · 1 CHF = 1.0569 EUR"). Summe, Kategorie-Summen, Liste
+und Kacheln zeigen nur noch den umgerechneten Betrag. Gerechnet wird im
+Dienst, die Kurse kommen von Frankfurter (siehe Root-README, „Frankfurter-Service").
+Die Auswahl in `lib/settlements/currencies.ts` spiegelt `SETTLEMENT_CURRENCIES`
+aus `src/db/schema.ts` – beide ändern.
+
+Eine Position ohne umgerechneten Betrag (kein Betrag, keine Währung, kein Datum
+oder kein Kurs) steht mit Hinweis da und fehlt in der Summe; die Summe sagt,
+wie viele fehlen. Ein vorläufiger Kurs (Belegdatum heute oder gestern) ist mit
+„prov." markiert. Beides sperrt **Submit**.
+
 Fehler kommen mit einem `code` (`locked`, `receipts-unavailable`, `empty`,
-`incomplete`) zurück, aus dem `app/(app)/settlements/actions.ts` den englischen
-Satz macht – der deutsche Text des Dienstes geht ins Server-Log.
+`incomplete`, `unconverted`, `rates-pending`) zurück, aus dem
+`app/(app)/settlements/actions.ts` den englischen Satz macht – der deutsche
+Text des Dienstes geht ins Server-Log.
 
 ## CSV-Export
 

@@ -139,9 +139,16 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
       <div className="border-line bg-panel grid grid-cols-2 overflow-hidden rounded-xl border">
         {LIVE_STATES.map((status) => {
           const list = settlements.filter((settlement) => settlement.status === status);
-          // Gross die haeufigste Waehrung, die uebrigen klein darunter: zwei
-          // Betraege nebeneinander passen nicht in eine Viertelkachel.
-          const [first, ...rest] = addTotals(list.flatMap((settlement) => settlement.totals));
+          // Je Abrechnungswaehrung, nicht je Belegwaehrung: jede Abrechnung
+          // ist schon ein Betrag. Gross die haeufigste, die uebrigen klein
+          // darunter - zwei Betraege nebeneinander passen nicht in die Kachel.
+          const [first, ...rest] = addTotals(
+            list.map((settlement) => ({
+              currency: settlement.total.currency,
+              count: 1,
+              sum: settlement.total.sum,
+            })),
+          );
           return (
             <Link
               key={status}

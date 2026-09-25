@@ -29,6 +29,13 @@
       "when": 1790334686856,
       "tag": "0003_manual_entries_corrections",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790338731875,
+      "tag": "0004_settlement_currency",
+      "breakpoints": true
     }
   ]
 }

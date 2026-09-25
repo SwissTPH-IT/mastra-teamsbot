@@ -20,7 +20,7 @@
 // deploy-Werte kamen dagegen aus dieser Datei. Solange railway.json existiert,
 // ist also offen, welche Haelfte gilt.
 
-import { defineRailway, github, postgres, preserve, project, service, volume } from "railway/iac";
+import { defineRailway, github, image, postgres, preserve, project, service, volume } from "railway/iac";
 
 const REPO = "SwissTPH-IT/mastra-teamsbot";
 const REGION = "europe-west4-drams3a";
@@ -29,6 +29,22 @@ export default defineRailway(() => {
   const Postgres = postgres("Postgres", { region: REGION });
   const postgresVolume = volume("postgres-volume", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
   const mastraTeamsbotVolume8j43 = volume("mastra-teamsbot-volume-8j43", { alerts: { usage: { "100": {}, "80": {}, "95": {} } }, allowOnlineResize: true, region: REGION, sizeMB: 50000 });
+
+  // Wechselkurse fuer die Abrechnungswaehrung. Fertiges Image, kein Build aus
+  // dem Repo; nur privat erreichbar (keine Domain). Volume, weil Frankfurter
+  // seine Kurse in SQLite haelt und der Backfill sonst bei jedem Deploy von
+  // vorn beginnt.
+  const frankfurterVolume = volume("frankfurter-volume", { region: REGION, sizeMB: 5000 });
+  const frankfurter = service("frankfurter", {
+    source: image("lineofflight/frankfurter"),
+    deploy: { healthcheckPath: "/", healthcheckTimeout: 300, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
+    replicas: { [REGION]: 1 },
+    volumeMounts: { "/app/data": frankfurterVolume },
+    env: {
+      PORT: "8080",
+      DATABASE_URL: "sqlite:///app/data/frankfurter.sqlite3",
+    },
+  });
 
   // Der Fachdaten-Dienst: Eigentuemer von app.*. Dasselbe Repo, unterschieden
   // allein durch dockerfilePath. Kein Volume - er haelt keine Dateien.
@@ -50,6 +66,8 @@ export default defineRailway(() => {
       // werden mit 401 abgewiesen und der Grund landet im Log.
       ENTRA_TENANT_ID: preserve(),
       ENTRA_API_AUDIENCE: preserve(),
+      // Literal mit ${{...}}, aus demselben Grund wie API_URL unten.
+      FRANKFURTER_URL: `http://\${{${frankfurter.name}.RAILWAY_PRIVATE_DOMAIN}}:8080`,
     },
   });
 
@@ -112,6 +130,6 @@ export default defineRailway(() => {
   });
 
   return project("agent-framework", {
-    resources: [mastraAgent, receiptApi, receiptFrontend, Postgres, postgresVolume, mastraTeamsbotVolume8j43],
+    resources: [mastraAgent, receiptApi, receiptFrontend, frankfurter, Postgres, postgresVolume, mastraTeamsbotVolume8j43, frankfurterVolume],
   });
 });

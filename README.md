@@ -984,6 +984,36 @@ Migrations-/Prune-Job lassen Luft. Das Frontend zählt nicht mehr mit – es hat
 keinen Pool. Zwei Environments auf **einer** Instanz wären trotzdem zu viel,
 deshalb pro Environment eine eigene Datenbank.
 
+### Frankfurter-Service (Wechselkurse)
+
+Eine Abrechnung lautet auf **eine** Währung (CHF, EUR, USD oder GBP, beim
+Anlegen gewählt, im Entwurf änderbar). Jede Position wird zum Kurs **ihres
+Belegdatums** darin umgerechnet. Die Kurse kommen von
+[Frankfurter](https://frankfurter.dev), selbst gehostet als fertiges Image
+`lineofflight/frankfurter` – kein Build aus diesem Repo, keine öffentliche
+Domain, ein Volume für seine SQLite-Datenbank (`/app/data`).
+
+Nur der API-Dienst spricht mit ihm, über `FRANKFURTER_URL` (Private
+Networking, Port 8080; lokal Default `http://localhost:8080`). Er fragt
+`GET /v2/rate/<Abrechnungswährung>/<Belegwährung>?date=<Belegdatum>` und legt
+jeden Kurs in `app.exchange_rates` ab; gerechnet wird in Postgres
+(`round(betrag / kurs, 2)`). Die Richtung „1 CHF = 157.02 KES" ist Absicht:
+Frankfurter rundet auf fünf Nachkommastellen, KES→CHF wäre nur `0.00636`.
+
+- **Vorläufig und fest.** Ein Kurs, der vor dem Belegdatum liegt (Zukunft,
+  noch nicht veröffentlicht) oder weniger als zwei Tage nach ihm geholt wurde,
+  gilt als vorläufig und wird höchstens stündlich neu geholt. Ein fester Kurs
+  wird nie überschrieben. **Einreichen** verlangt, dass jede Position einen
+  Betrag in der Abrechnungswährung hat (`unconverted`) und kein Kurs mehr
+  vorläufig ist (`rates-pending`) – so bewegt sich eine eingereichte Summe nie.
+- **Ohne Frankfurter** bleibt alles lesbar; Positionen ohne Kurs stehen als
+  „Rate unavailable" da, die Summe sagt, wie viele fehlen, und Einreichen geht
+  nicht. Nach dem ersten Start füllt Frankfurter seine Datenbank aus den
+  Zentralbankquellen nach und antwortet bis dahin für manche Währungen mit 404;
+  der Dienst fragt solche Lücken nach 15 Minuten erneut.
+- Frankfurter mittelt über seine Quellen (206 Währungen, auch KES, TZS, XOF)
+  und hat damit auch für Wochenenden einen Tageskurs.
+
 ### Staging und Produktion
 
 Zwei Railway-Environments mit je **eigenem** Postgres-Service, beide aus
