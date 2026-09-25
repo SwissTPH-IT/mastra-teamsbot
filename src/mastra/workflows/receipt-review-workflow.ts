@@ -19,7 +19,7 @@ import { z } from 'zod';
 import { receiptSchema } from '../agents/receipt-agent';
 import { candidateSchema, formatCandidate, toCandidate, type ReceiptCandidate } from '../receipts/candidate';
 import { receiptExtractionWorkflow } from './receipt-extraction-workflow';
-import { saveReceipt } from '../../db/receipts';
+import { receiptApi } from '../api-client';
 
 /**
  * Deckel für die Korrekturschleife. Nach so vielen Runden ohne Bestätigung ist
@@ -231,8 +231,10 @@ const reviewCandidate = createStep({
 /**
  * Schritt 3 — Schreiben.
  *
- * Läuft nur, wenn Schritt 2 mit `confirmed` zurückgekommen ist. Der Upsert
- * gegen (user_id, file_hash) macht ein wiederholtes Resume idempotent.
+ * Läuft nur, wenn Schritt 2 mit `confirmed` zurückgekommen ist. Geschrieben
+ * wird über den API-Dienst, nicht mehr direkt über Drizzle – der Agent hat auf
+ * app.* kein Schreibrecht mehr nötig. Der Upsert dort gegen
+ * (user_id, file_hash) macht ein wiederholtes Resume weiterhin idempotent.
  */
 const persistReceipt = createStep({
   id: 'persist-receipt',
@@ -272,7 +274,8 @@ const persistReceipt = createStep({
       throw new Error('Bestätigt, aber kein Kandidatensatz im State – das darf nicht passieren.');
     }
 
-    const row = await saveReceipt(userId, {
+    const receipt = await receiptApi.create({
+      userId,
       candidate: state.candidate,
       fileHash: inputData.fileHash,
       fileReference: inputData.fileReference,
@@ -281,7 +284,7 @@ const persistReceipt = createStep({
 
     return {
       status: 'saved' as const,
-      receiptId: row.id,
+      receiptId: receipt.id,
       candidate: state.candidate,
       message: 'Gespeichert.',
     };
