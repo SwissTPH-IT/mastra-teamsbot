@@ -136,7 +136,7 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
       <div className="text-ink-3 text-[10.5px] font-semibold tracking-[0.09em] uppercase">
         Settlements
       </div>
-      <div className="border-line bg-panel grid grid-cols-4 overflow-hidden rounded-xl border">
+      <div className="border-line bg-panel grid grid-cols-2 overflow-hidden rounded-xl border">
         {LIVE_STATES.map((status) => {
           const list = settlements.filter((settlement) => settlement.status === status);
           // Gross die haeufigste Waehrung, die uebrigen klein darunter: zwei
