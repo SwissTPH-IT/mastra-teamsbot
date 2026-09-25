@@ -159,7 +159,8 @@ export function CorrectionForm({
 
         <div className="flex flex-col gap-[2px]">
           <div className="text-ink-3 mb-[6px] text-[10.5px] font-semibold tracking-[0.09em] uppercase">
-            {manual ? "Entered fields · editable" : "Extracted fields · editable"}
+            {manual ? "Entered fields" : "Extracted fields"}
+            {lockedReason ? "" : " · editable"}
           </div>
 
           <EditRow label={manual ? "label" : "merchant"} error={error("merchant")}>
