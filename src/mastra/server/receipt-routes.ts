@@ -2,7 +2,7 @@
 // abdeckt: Datei hinein, Datei wieder heraus.
 //
 //   POST /receipts/upload          multipart "file" -> { uploadId, ... }
-//   GET  /receipts/:uploadId/file  liefert das Bild für die Vorschau
+//   GET  /receipts/:uploadId/file  liefert Bild oder PDF für die Vorschau
 //
 // Ohne /api-Prefix: den reserviert Mastra für seine eingebauten Routen.
 
@@ -11,7 +11,7 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import {
-  ALLOWED_UPLOAD_TYPES,
+  ACCEPTED_FORMATS,
   MAX_UPLOAD_BYTES,
   resolveUploadPath,
   storeUpload,
@@ -22,6 +22,7 @@ const MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',
   webp: 'image/webp',
   gif: 'image/gif',
+  pdf: 'application/pdf',
 };
 
 export const uploadReceiptRoute = registerApiRoute('/receipts/upload', {
@@ -29,7 +30,7 @@ export const uploadReceiptRoute = registerApiRoute('/receipts/upload', {
   openapi: {
     summary: 'Belegbild hochladen',
     description:
-      'Nimmt ein einzelnes Bild als multipart/form-data (Feld "file") an, legt es im ' +
+      'Nimmt ein einzelnes Bild oder PDF als multipart/form-data (Feld "file") an, legt es im ' +
       'Datenverzeichnis ab und gibt die uploadId zurück, mit der das Extraktions-Tool ' +
       'den Workflow starten kann.',
     tags: ['receipts'],
@@ -52,7 +53,7 @@ export const uploadReceiptRoute = registerApiRoute('/receipts/upload', {
     }
 
     try {
-      const stored = await storeUpload(file);
+      const stored = await storeUpload(new Uint8Array(await file.arrayBuffer()), file.name);
       c.get('mastra')
         ?.getLogger()
         ?.info(`[receipts] Upload gespeichert: ${stored.uploadId} (${stored.filename})`);
@@ -61,7 +62,7 @@ export const uploadReceiptRoute = registerApiRoute('/receipts/upload', {
       return c.json(
         {
           error: error instanceof Error ? error.message : 'Upload fehlgeschlagen.',
-          allowedTypes: Object.keys(ALLOWED_UPLOAD_TYPES),
+          allowedTypes: ACCEPTED_FORMATS,
           maxBytes: MAX_UPLOAD_BYTES,
         },
         400,

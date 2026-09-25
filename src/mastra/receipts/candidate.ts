@@ -234,38 +234,42 @@ export function toCandidate(receipt: ReceiptData): ReceiptCandidate {
   };
 }
 
-/** Die Vorlage für den Nutzer im Teams-Thread. */
+/**
+ * Die Vorlage als Text (Suspend-Payload, im Studio sichtbar). Englisch wie
+ * alles, was im Teams-Thread landen kann.
+ */
 export function formatCandidate(candidate: ReceiptCandidate): string {
-  const line = (label: string, val: string | null) => `- **${label}:** ${val ?? '_nicht gelesen_'}`;
+  const line = (label: string, val: string | null) => `- **${label}:** ${val ?? '_not read_'}`;
   const amount =
     candidate.totalAmount === null
       ? null
       : [candidate.currency, candidate.totalAmount].filter(Boolean).join(' ');
 
   const rows = [
-    line('Händler', candidate.merchant),
-    line('Datum', candidate.receiptDate),
-    line('Betrag', amount),
-    line('MwSt.', candidate.vatAmount),
-    line('Zahlungsart', candidate.paymentMethod),
+    line('Merchant', candidate.merchant),
+    line('Date', candidate.receiptDate),
+    line('Total', amount),
+    line('Payment method', candidate.paymentMethod),
   ];
 
-  if (candidate.category) rows.push(line('Kategorie', candidate.category));
-  if (candidate.lineItems.length > 0) rows.push(`- **Positionen:** ${candidate.lineItems.length}`);
+  if (candidate.category) rows.push(line('Category', candidate.category));
+  if (candidate.lineItems.length > 0) rows.push(`- **Line items:** ${candidate.lineItems.length}`);
   if (candidate.issues.length > 0) rows.push(`\n⚠️ ${candidate.issues.join('; ')}`);
 
   return rows.join('\n');
 }
 
-/* ---------- Die vier Felder, die in der Adaptive Card bestätigt werden ---------- */
+/* ---------- Die drei Felder, die in der Adaptive Card bestätigt werden ---------- */
 
 /**
  * Die Felder, die der Nutzer in der Karte gegenlesen und im Dialog korrigieren
- * kann. Bewusst genau diese vier: sie entscheiden über die Buchung. Händler und
- * Positionen sind für die Buchhaltung Beiwerk und bleiben dem Freitext-Weg
+ * kann. Bewusst genau diese drei: sie entscheiden über die Buchung. Die MwSt.
+ * wird für die Abrechnung nicht gebraucht und deshalb nicht abgefragt – sie
+ * wird weiterhin extrahiert und mitgespeichert, aber niemand muss sie
+ * bestätigen. Händler und Positionen sind Beiwerk und bleiben dem Freitext-Weg
  * (receipt-correction-agent) überlassen.
  */
-export const REVIEW_FIELDS = ['receiptDate', 'currency', 'vatAmount', 'totalAmount'] as const;
+export const REVIEW_FIELDS = ['receiptDate', 'currency', 'totalAmount'] as const;
 
 export type ReviewField = (typeof REVIEW_FIELDS)[number];
 
@@ -316,10 +320,10 @@ export function applyReviewEdits(candidate: ReceiptCandidate, edits: ReviewEdits
     next[field] = parsed;
   };
 
-  apply('receiptDate', raw => parseDate(raw), 'Datum nicht lesbar – erwartet wird z. B. 2026-03-14.');
-  apply('currency', raw => parseCurrency(raw), 'Währung unbekannt – erwartet wird CHF, EUR, USD oder GBP.');
-  apply('vatAmount', raw => parseAmount(raw), 'Steuerbetrag nicht lesbar – erwartet wird z. B. 3.20.');
-  apply('totalAmount', raw => parseAmount(raw), 'Betrag nicht lesbar – erwartet wird z. B. 42.10.');
+  // Die Hinweise erscheinen im Teams-Dialog, deshalb Englisch.
+  apply('receiptDate', raw => parseDate(raw), 'Date not readable – expected e.g. 2026-03-14.');
+  apply('currency', raw => parseCurrency(raw), 'Unknown currency – expected CHF, EUR, USD or GBP.');
+  apply('totalAmount', raw => parseAmount(raw), 'Total not readable – expected e.g. 42.10.');
 
   return { candidate: next, errors };
 }

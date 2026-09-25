@@ -72,6 +72,7 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
           {source === "receipt" ? (
             <ReceiptImage
               src={`/api/receipts/${receipt.id}/image`}
+              isPdf={receipt.fileReference?.endsWith(".pdf") ?? false}
               capturedAt={`Captured in Teams · ${formatTimestamp(receipt.createdAt)}`}
             />
           ) : (

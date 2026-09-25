@@ -62,19 +62,13 @@ describe('Adaptive Card', () => {
     }
   });
 
-  it('zeigt genau die vier bestätigungspflichtigen Felder plus Händler', () => {
+  it('zeigt genau die drei bestätigungspflichtigen Felder plus Händler – ohne MwSt., auf Englisch', () => {
     const card = toAdaptive(
       buildReviewCard({ candidate, runId: RUN_ID, round: 0, maxRounds: 3, isRecheck: false }),
     ) as unknown as { body: { type: string; facts?: { title: string; value: string }[] }[] };
 
     const facts = card.body.find(element => element.type === 'FactSet')?.facts;
-    expect(facts?.map(fact => fact.title)).toEqual([
-      'Händler',
-      'Datum',
-      'Währung',
-      'Steuer (MwSt.-Betrag)',
-      'Total (Betrag)',
-    ]);
+    expect(facts?.map(fact => fact.title)).toEqual(['Merchant', 'Date', 'Currency', 'Total']);
   });
 
   it('ignoriert fremde actionIds – Mastras Tool-Freigaben laufen über denselben Handler', () => {
@@ -96,7 +90,7 @@ describe('Adaptive Card', () => {
         .map(child => [child.id, child]),
     );
 
-    expect(Object.keys(byId)).toEqual(['receiptDate', 'currency', 'vatAmount', 'totalAmount']);
+    expect(Object.keys(byId)).toEqual(['receiptDate', 'currency', 'totalAmount']);
     expect(byId.receiptDate).toMatchObject({ type: 'date_input', initialValue: '2026-03-14' });
     expect(byId.currency).toMatchObject({ type: 'select', initialOption: 'CHF' });
     expect(byId.totalAmount).toMatchObject({ type: 'text_input', initialValue: '42.10' });
@@ -106,12 +100,12 @@ describe('Adaptive Card', () => {
     const modal = buildEditModal({
       candidate,
       runId: RUN_ID,
-      errors: { totalAmount: 'Betrag nicht lesbar.' },
+      errors: { totalAmount: 'Total not readable.' },
       values: { totalAmount: 'zwölf' },
     });
 
     expect(JSON.stringify(modal)).toContain('zwölf');
-    expect(JSON.stringify(modal)).toContain('Betrag nicht lesbar.');
+    expect(JSON.stringify(modal)).toContain('Total not readable.');
   });
 });
 
@@ -135,10 +129,18 @@ describe('Dialog-Eingaben übernehmen', () => {
   });
 
   it('macht ein geleertes Feld zu null – das ist der Weg, einen falschen Wert loszuwerden', () => {
-    const { candidate: edited, errors } = applyReviewEdits(candidate, { vatAmount: '   ' });
+    const { candidate: edited, errors } = applyReviewEdits(candidate, { totalAmount: '   ' });
 
     expect(errors).toEqual({});
-    expect(edited.vatAmount).toBeNull();
+    expect(edited.totalAmount).toBeNull();
+  });
+
+  it('übernimmt keine MwSt. aus dem Dialog – sie wird nicht abgefragt', () => {
+    const { candidate: edited } = applyReviewEdits(candidate, {
+      vatAmount: '9.99',
+    } as Record<string, string>);
+
+    expect(edited.vatAmount).toBe('3.20');
   });
 
   it('meldet eine unlesbare Eingabe, statt still null zu speichern', () => {

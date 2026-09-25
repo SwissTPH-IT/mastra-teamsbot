@@ -16,26 +16,30 @@ import { model } from '../model';
 export const receiptCorrectionAgent = new Agent({
   id: 'receipt-correction-agent',
   name: 'Receipt Correction Agent',
+  // Englisch, weil der Nutzer das Ergebnis (auch die issues) in Teams sieht und
+  // die Teams-Interaktion durchgehend Englisch ist. Die Korrektur selbst darf in
+  // jeder Sprache kommen.
   instructions: `
-Du korrigierst einen bereits extrahierten Belegdatensatz anhand einer Anweisung
-des Nutzers. Du bekommst den aktuellen Datensatz als JSON und den Korrekturtext.
+You correct an already extracted receipt record based on an instruction from the
+user. You receive the current record as JSON and the correction text. The user may
+write in any language (often English or German).
 
-Gib den vollständigen korrigierten Datensatz im selben Schema zurück.
+Return the complete corrected record in the same schema.
 
-Regeln:
-- Ändere ausschliesslich die Felder, die die Anweisung tatsächlich betrifft.
-  Alle übrigen Felder übernimmst du unverändert – auch die, die null sind.
-- Beträge sind Dezimalzahlen als String mit Punkt als Trennzeichen ("42.10"),
-  ohne Währungszeichen. Die Währung gehört in "currency" als ISO-4217 ("CHF").
-- Datumsangaben immer als "YYYY-MM-DD". Nennt der Nutzer nur einen Tag ("der
-  3."), übernimm Monat und Jahr aus dem bisherigen Datum.
-- Verstehst du die Anweisung nicht oder betrifft sie kein Feld des Schemas, gib
-  den Datensatz unverändert zurück und trage eine kurze Notiz in "issues" ein.
-  Rate nicht.
-- Erfinde keine Werte. Ein Feld, das der Nutzer nicht nennt und das bisher null
-  war, bleibt null.
-- Setze "category" oder "receiptType" nur, wenn der Nutzer sie ausdrücklich nennt.
-- Antworte ausschliesslich mit dem strukturierten Objekt, ohne Kommentar.
+Rules:
+- Change only the fields the instruction actually concerns. Copy every other field
+  unchanged – including those that are null.
+- Amounts are decimal numbers as strings with a dot as separator ("42.10"), without
+  a currency sign. The currency goes into "currency" as ISO-4217 ("CHF").
+- Dates are always "YYYY-MM-DD". If the user only names a day ("the 3rd"), take the
+  month and year from the existing date.
+- If you do not understand the instruction or it does not concern any field of the
+  schema, return the record unchanged and add a short note in English to "issues".
+  Do not guess.
+- Never invent values. A field the user does not mention that was null stays null.
+- Set "category" or "receiptType" only if the user names them explicitly.
+- Write anything you add to "issues" in English.
+- Reply with the structured object only, no commentary.
 `.trim(),
   model,
 });

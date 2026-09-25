@@ -14,6 +14,10 @@
 // den der Adapter an `chat.onAction` gibt (siehe receipt-card-handlers.ts).
 // Der Textweg hier bleibt daneben bestehen, für alle, die lieber tippen.
 //
+// Alles, was hier in den Thread geht, ist Englisch – unabhängig von der Sprache
+// des Nutzers. Die Fehlertexte aus upload-store/API sind deutsch (Log, REST)
+// und werden deshalb nicht durchgereicht, sondern hier neu formuliert.
+//
 // Die Zuordnung Thread -> runId steht in app.pending_reviews, damit sie einen
 // Prozess-Neustart und ein Railway-Deploy überlebt. Der Kandidatensatz steht
 // dort NICHT – der liegt im Workflow-Snapshot, wo Mastra ihn verwaltet.
@@ -31,12 +35,14 @@ import {
   openPendingReview,
 } from '../../db/receipts';
 import {
-  ALLOWED_UPLOAD_TYPES,
+  ACCEPTED_FORMATS,
   MAX_UPLOAD_BYTES,
+  UploadTooLargeError,
   resolveReceiptJsonPath,
   resolveUploadPath,
   storeUpload,
 } from '../receipts/upload-store';
+import { UnsupportedReceiptFileError } from '../receipts/file-format';
 
 /**
  * Die Felder der Bot-Framework-Activity, die wir lesen.
@@ -98,42 +104,17 @@ function readIdentity(
  *
  * Der mimeType allein reicht als Kriterium nicht: ein direkt in die Teams-
  * Nachricht eingefügtes Bild kommt als `contentType: "image/*"` herein – mit
- * Stern, ohne konkretes Format. Deshalb hier nur die grobe Klasse prüfen; das
- * echte Format bestimmt `detectImageMime()` später an den Bytes.
+ * Stern, ohne konkretes Format. Hochgeladene Dateien bekommen ihren Typ vom
+ * Adapter aus der Endung, und alles, was er nicht kennt (.heic, .tif, .bmp),
+ * wird `application/octet-stream`. Deshalb hier nur die grobe Klasse prüfen;
+ * das echte Format bestimmt `normalizeReceiptFile()` an den Bytes.
  */
-function isReceiptImage(attachment: { type: string; mimeType?: string }): boolean {
+function isReceiptAttachment(attachment: { type: string; mimeType?: string }): boolean {
   if (attachment.type === 'image') return true;
-  // Hochgeladene Dateien ohne erkennbare Endung landen als "file" mit
-  // application/octet-stream. Ob wirklich ein Bild drinsteckt, klärt
-  // detectImageMime() – hier nur nicht vorschnell aussortieren.
-  return attachment.type === 'file' && attachment.mimeType === 'application/octet-stream';
-}
-
-/**
- * Bildformat an den Magic Bytes erkennen.
- *
- * Verlässlicher als der von Teams gemeldete contentType und gleichzeitig die
- * Validierung: was hier nicht erkannt wird, ist keines der vier Formate, die
- * `storeUpload()` akzeptiert.
- */
-function detectImageMime(bytes: Uint8Array): string | undefined {
-  const startsWith = (...signature: number[]) =>
-    signature.every((byte, index) => bytes[index] === byte);
-
-  if (startsWith(0xff, 0xd8, 0xff)) return 'image/jpeg';
-  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
-  if (startsWith(0x47, 0x49, 0x46, 0x38)) return 'image/gif';
-  // WebP: "RIFF" an Position 0, "WEBP" an Position 8.
-  if (
-    startsWith(0x52, 0x49, 0x46, 0x46) &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return 'image/webp';
-  }
-  return undefined;
+  return (
+    attachment.type === 'file' &&
+    (attachment.mimeType === 'application/pdf' || attachment.mimeType === 'application/octet-stream')
+  );
 }
 
 /**
@@ -172,8 +153,34 @@ async function readAttachment(attachment: {
  * Information fehlt beim Debuggen, also hier anhängen.
  */
 function annotateModelError(reason: string): string {
-  if (!/support image input|does not support image|vision/i.test(reason)) return reason;
-  return `${reason} (konfiguriertes Modell: "${model}" – MASTRA_MODEL muss auf ein vision-fähiges Modell zeigen)`;
+  if (!/support image input|does not support image|vision|pdf|file input/i.test(reason)) return reason;
+  return `${reason} (configured model: "${model}" – MASTRA_MODEL must point to a model that reads images and PDFs)`;
+}
+
+/**
+ * Die Meldung im Thread, wenn ein Beleg nicht angenommen oder nicht gelesen
+ * werden konnte. Nur bekannte Fälle bekommen eine eigene Erklärung; Modellfehler
+ * kommen vom Provider ohnehin auf Englisch. Alles andere (deutsche Texte aus
+ * API und Workflow) bleibt im Log.
+ */
+function intakeErrorText(name: string, error: unknown): string {
+  if (error instanceof UploadTooLargeError) {
+    return (
+      `❌ **${name}** is ${(error.bytes / 1024 / 1024).toFixed(1)} MB – ` +
+      `the limit is ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.`
+    );
+  }
+  if (error instanceof UnsupportedReceiptFileError) {
+    return (
+      `❌ **${name}** could not be read as a receipt. ` +
+      `Supported formats: ${ACCEPTED_FORMATS.join(', ')}.`
+    );
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  const annotated = annotateModelError(reason);
+  return annotated === reason
+    ? `❌ **${name}** could not be processed. Please try again or send a clearer photo.`
+    : `❌ **${name}** could not be processed: ${annotated}`;
 }
 
 /**
@@ -185,12 +192,17 @@ function annotateModelError(reason: string): string {
  * einer erneuten Vorlage, also im schlimmsten Fall zu einer Rückfrage zu viel
  * statt zu einer falschen Buchung.
  */
+// Englisch zuerst, weil die Karte Englisch spricht; die deutschen Wörter
+// bleiben, damit ein "passt" nicht plötzlich als Korrektur gilt.
 const CONFIRM_WORDS = [
-  'ja', 'passt', 'stimmt', 'korrekt', 'richtig', 'ok', 'okay', 'bestätigt', 'bestaetigt',
-  'speichern', 'übernehmen', 'uebernehmen', 'yes', 'jup', 'jo', 'genau', 'perfekt', '👍', '✅',
+  'yes', 'ok', 'okay', 'confirm', 'confirmed', 'correct', 'right', 'fine', 'good', 'looks good',
+  'all good', 'lgtm', 'save', 'approve', 'approved', 'yep', 'yup', 'sure', 'perfect', 'exactly',
+  'ja', 'passt', 'stimmt', 'korrekt', 'richtig', 'bestätigt', 'bestaetigt', 'speichern',
+  'übernehmen', 'uebernehmen', 'jup', 'jo', 'genau', 'perfekt', '👍', '✅',
 ];
 const CANCEL_WORDS = [
-  'abbrechen', 'abbruch', 'verwerfen', 'löschen', 'loeschen', 'nicht speichern', 'cancel', 'stop',
+  'cancel', 'stop', 'abort', 'discard', 'delete', "don't save", 'dont save', 'do not save',
+  'abbrechen', 'abbruch', 'verwerfen', 'löschen', 'loeschen', 'nicht speichern',
 ];
 
 export function classifyReply(text: string): ReviewResume {
@@ -209,7 +221,7 @@ export function classifyReply(text: string): ReviewResume {
   if (
     normalized.length <= 25 &&
     CONFIRM_WORDS.some(word => stripped.startsWith(word)) &&
-    !/nicht|kein|falsch|aber|ausser|außer/.test(normalized)
+    !/\b(not|no|wrong|but|except|isn't|incorrect)\b|n't|nicht|kein|falsch|aber|ausser|außer/.test(normalized)
   ) {
     return { kind: 'confirm' };
   }
@@ -224,7 +236,7 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
   const mastra = ctx.mastra;
   if (!mastra) {
     await thread.post(
-      '❌ Interner Fehler: keine Mastra-Instanz im Channel-Handler – der Beleg-Workflow ist nicht erreichbar.',
+      '❌ Internal error: the receipt workflow is not reachable. Please try again later.',
     );
     return;
   }
@@ -239,13 +251,13 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
 
   const logger = mastra.getLogger();
   const workflow = mastra.getWorkflowById('receipt-review-workflow');
-  const images = message.attachments.filter(isReceiptImage);
+  const files = message.attachments.filter(isReceiptAttachment);
 
   // Ohne das ist ein aussortierter Anhang von "gar kein Anhang" nicht zu
   // unterscheiden – und der Nutzer sieht nur, dass der Agent antwortet.
   if (message.attachments.length > 0) {
     logger?.debug(
-      `[teams] ${images.length}/${message.attachments.length} Anhänge als Beleg erkannt: ${message.attachments
+      `[teams] ${files.length}/${message.attachments.length} Anhänge als Beleg erkannt: ${message.attachments
         .map(a => `${a.name ?? 'ohne Namen'} (type=${a.type}, mime=${a.mimeType ?? 'unbekannt'})`)
         .join(', ')}`,
     );
@@ -272,7 +284,7 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
 
   /* ---------- Fall 1: Antwort auf eine offene Vorlage ---------- */
 
-  if (images.length === 0) {
+  if (files.length === 0) {
     const pending = await getPendingReview(thread.id);
     if (!pending) {
       // Ganz normale Nachricht: der Agent antwortet, mit den DB-Tools.
@@ -300,50 +312,37 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
 
   /* ---------- Fall 2: neuer Beleg ---------- */
 
-  // Mehrere Bilder in einer Nachricht: nur das erste geht in den Review. Zwei
+  // Mehrere Dateien in einer Nachricht: nur die erste geht in den Review. Zwei
   // gleichzeitig offene Vorlagen im selben Thread wären für den Nutzer nicht
   // auseinanderzuhalten – er antwortet mit einem Satz, und beide Runs würden
   // ihn beanspruchen.
-  if (images.length > 1) {
+  if (files.length > 1) {
     await thread.post(
-      `Ich habe ${images.length} Bilder bekommen und nehme das erste. Die übrigen bitte einzeln ` +
-        'schicken – jeder Beleg wird einzeln bestätigt.',
+      `I received ${files.length} files and will take the first one. Please send the others ` +
+        'one at a time – each receipt is confirmed separately.',
     );
   }
 
-  const attachment = images[0];
-  const name = attachment.name || 'Beleg';
+  const attachment = files[0];
+  const name = attachment.name || 'Receipt';
 
-  await thread.startTyping('Beleg wird gelesen…');
+  await thread.startTyping('Reading receipt…');
 
   try {
     const bytes = await readAttachment(attachment);
-    if (bytes.byteLength > MAX_UPLOAD_BYTES) {
-      throw new Error(
-        `Datei ist ${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB groß, erlaubt sind maximal ${
-          MAX_UPLOAD_BYTES / 1024 / 1024
-        } MB.`,
-      );
-    }
-
-    // Teams meldet für eingefügte Bilder nur "image/*", deshalb das Format an
-    // den Bytes bestimmen statt dem gemeldeten mimeType zu vertrauen.
-    const mimeType = detectImageMime(bytes);
-    if (!mimeType) {
-      throw new Error(
-        `Dateiformat nicht erkannt (Teams meldete "${attachment.mimeType ?? 'unbekannt'}"). Erlaubt: ${Object.keys(
-          ALLOWED_UPLOAD_TYPES,
-        ).join(', ')}`,
-      );
-    }
 
     // Der Idempotenz-Key: derselbe Beleg zweimal geschickt gibt denselben Hash
-    // und damit per Upsert dieselbe Zeile.
+    // und damit per Upsert dieselbe Zeile. Über die Originalbytes, nicht über
+    // die konvertierte Fassung – die hängt von der sharp-Version ab.
     const fileHash = createHash('sha256').update(bytes).digest('hex');
 
-    // storeUpload() validiert Typ und Größe und vergibt die uploadId – exakt
-    // derselbe Pfad wie beim Upload aus dem Web-Frontend.
-    const stored = await storeUpload(new File([bytes as BlobPart], name, { type: mimeType }));
+    // storeUpload() prüft Grösse und Format an den Bytes (Teams meldet für
+    // eingefügte Bilder nur "image/*"), konvertiert HEIC/TIFF/BMP/AVIF nach
+    // JPEG und vergibt die uploadId – derselbe Pfad wie POST /receipts/upload.
+    const stored = await storeUpload(bytes, name);
+    if (stored.convertedFrom) {
+      logger?.debug(`[teams] "${name}" von ${stored.convertedFrom} nach ${stored.mimeType} konvertiert.`);
+    }
 
     const run = await workflow.createRun();
 
@@ -371,7 +370,8 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
     if (result.status === 'failed') {
       await closePendingReview(thread.id);
       const reason = result.error?.message || String(result.error);
-      await thread.post(`❌ **${name}** – nicht verarbeitet: ${annotateModelError(reason)}`);
+      logger?.error(`[teams] Beleg "${name}" konnte nicht verarbeitet werden: ${reason}`);
+      await thread.post(intakeErrorText(name, new Error(reason)));
       return;
     }
 
@@ -382,6 +382,6 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
     logger?.error(`[teams] Beleg "${name}" konnte nicht verarbeitet werden: ${errorMessage}`);
     // Auch im Fehlerfall bekommt der Nutzer eine Antwort – ein stiller Fehler in
     // Teams sieht für ihn aus wie ein hängender Bot.
-    await thread.post(`❌ **${name}** – nicht verarbeitet: ${annotateModelError(errorMessage)}`);
+    await thread.post(intakeErrorText(name, error));
   }
 };

@@ -3,6 +3,9 @@
 // In die Datenbank wird ausschliesslich nach bestätigtem Zustand geschrieben.
 // Kein Schreiben auf Verdacht, kein späteres Aufräumen.
 //
+// Bestätigt werden Datum, Währung und Total (REVIEW_FIELDS). Die `message` im
+// Ergebnis ist Englisch: der Teams-Handler postet sie unverändert in den Thread.
+//
 // Der Kandidatensatz liegt zwischen Vorlage und Bestätigung im Workflow-State
 // und damit im Snapshot in mastra.mastra_workflow_snapshot – nicht im
 // Gesprächsverlauf. Sonst entschiede die Kontextlänge darüber, ob eine Buchung
@@ -153,7 +156,7 @@ const reviewCandidate = createStep({
     z.object({ kind: z.literal('confirm') }),
     z.object({ kind: z.literal('correct'), text: z.string().min(1) }),
     z.object({ kind: z.literal('cancel') }),
-    // Der Weg über die Adaptive Card: der Nutzer hat die vier Pflichtfelder im
+    // Der Weg über die Adaptive Card: der Nutzer hat die drei Pflichtfelder im
     // Dialog selbst gesetzt. Der Kandidat kommt hier fertig geparst an – die
     // Eingaben laufen in der Kanalschicht durch dieselben Parser wie die
     // Extraktion (applyReviewEdits), damit unlesbare Eingaben schon im Dialog
@@ -189,7 +192,7 @@ const reviewCandidate = createStep({
     }
 
     // Anpassen im Dialog ist gleichzeitig die Bestätigung: der Nutzer hat die
-    // Werte selbst eingetippt und mit "Übernehmen & speichern" abgeschickt.
+    // Werte selbst eingetippt und mit "Apply & save" abgeschickt.
     // Eine weitere Vorlage würde ihm nur seine eigene Eingabe vorlegen.
     if (resumeData.kind === 'edit') {
       await setState({ ...state, candidate: resumeData.candidate });
@@ -203,8 +206,8 @@ const reviewCandidate = createStep({
         {
           role: 'user',
           content:
-            `Aktueller Datensatz:\n${JSON.stringify(candidate, null, 2)}\n\n` +
-            `Korrektur des Nutzers:\n${resumeData.text}`,
+            `Current record:\n${JSON.stringify(candidate, null, 2)}\n\n` +
+            `User correction:\n${resumeData.text}`,
         },
       ],
       { structuredOutput: { schema: candidateSchema } },
@@ -255,7 +258,7 @@ const persistReceipt = createStep({
         status: 'cancelled' as const,
         receiptId: null,
         candidate: state.candidate,
-        message: 'Abgebrochen. Der Beleg wurde nicht gespeichert.',
+        message: 'Cancelled. The receipt was not saved.',
       };
     }
 
@@ -265,8 +268,8 @@ const persistReceipt = createStep({
         receiptId: null,
         candidate: state.candidate,
         message:
-          `Nach ${MAX_CORRECTION_ROUNDS} Korrekturrunden immer noch nicht bestätigt – ` +
-          'nichts gespeichert. Bitte ein neues Foto schicken (gerade, vollständig im Bild, mehr Licht).',
+          `Still not confirmed after ${MAX_CORRECTION_ROUNDS} correction rounds – ` +
+          'nothing saved. Please send a new photo (straight, fully in frame, more light).',
       };
     }
 
@@ -286,7 +289,7 @@ const persistReceipt = createStep({
       status: 'saved' as const,
       receiptId: receipt.id,
       candidate: state.candidate,
-      message: 'Gespeichert.',
+      message: 'Saved.',
     };
   },
 });
