@@ -158,10 +158,6 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
               <span className="text-ink-3 text-[11.5px]">
                 {list.length === 1 ? "1 settlement" : `${list.length} settlements`}
               </span>
-              {rest.length > 0 ? (
-                <span className="tabular text-ink-2 -mt-1 truncate text-[11.5px]">
-                </span>
-              ) : null}
             </Link>
           );
         })}
