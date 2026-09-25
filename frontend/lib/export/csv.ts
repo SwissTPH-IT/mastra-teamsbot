@@ -16,6 +16,7 @@
 
 import type { ApiReceipt } from "../api/receipts";
 import { formatReceiptDate, formatTimestamp } from "../receipts/format";
+import { sourceLabel } from "../receipts/review";
 
 /** Erlaubte Trennzeichen. Frei waehlbarer Text wuerde die Datei zerschiessen. */
 export const CSV_DELIMITERS = { semicolon: ";", comma: ",", tab: "\t" } as const;
@@ -72,6 +73,12 @@ const COLUMNS: Column[] = [
   { header: "Confidence", value: (row, o) => decimal(row.confidence, o) },
   { header: "Issues", value: (row) => (row.issues.length > 0 ? row.issues.join("; ") : null) },
   { header: "Captured at", value: (row) => formatTimestamp(row.createdAt) },
+  {
+    header: "Corrected at",
+    value: (row) => (row.correctedAt ? formatTimestamp(row.correctedAt) : null),
+  },
+  { header: "Source", value: (row) => sourceLabel(row) },
+  { header: "Reason (no receipt)", value: (row) => row.reason },
   { header: "File reference", value: (row) => row.fileReference },
 ];
 

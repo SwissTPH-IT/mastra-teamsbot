@@ -35,8 +35,15 @@ export type ApiReceipt = {
   confidence: string | null;
   issues: string[];
   lineItemCount: number;
-  /** "local:uploads/<uploadId>". Das Bild selbst liegt beim Agenten. */
-  fileReference: string;
+  /**
+   * "local:uploads/<uploadId>". Das Bild selbst liegt beim Agenten.
+   * null heisst: ohne Beleg im Web erfasst.
+   */
+  fileReference: string | null;
+  /** Warum es keinen Beleg gibt. Nur bei Ausgaben ohne Beleg gesetzt. */
+  reason: string | null;
+  /** Wann ein Mensch zuletzt einen Fachwert berichtigt hat. null: nie. */
+  correctedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -57,6 +64,7 @@ export async function fetchReceiptPage(query: ReceiptQuery): Promise<ReceiptPage
       from: query.from,
       to: query.to,
       category: query.category,
+      source: query.source,
       sort: query.sort,
       dir: query.dir,
       limit: query.pageSize,
@@ -81,7 +89,13 @@ export type CurrencySummary = {
 export async function fetchSummary(query?: ReceiptQuery): Promise<CurrencySummary[]> {
   const payload = await apiRequest<{ byCurrency: CurrencySummary[] }>("/receipts/summary", {
     query: query
-      ? { q: query.q, from: query.from, to: query.to, category: query.category }
+      ? {
+          q: query.q,
+          from: query.from,
+          to: query.to,
+          category: query.category,
+          source: query.source,
+        }
       : undefined,
   });
   return payload.byCurrency;
@@ -99,31 +113,69 @@ export async function fetchCategories(): Promise<string[]> {
   return payload.categories;
 }
 
-/** Die Felder, die die Detailansicht korrigieren darf. Deckt sich mit PATCH /receipts/:id. */
+/**
+ * Die Felder, die die Detailansicht korrigieren darf. Deckt sich mit
+ * PATCH /receipts/:id.
+ *
+ * Betraege, Datum und Waehrung gehen als ROHER Text an den Dienst ("42,10",
+ * "14.03.2026"). Gelesen wird dort, mit denselben Parsern wie bei der
+ * Extraktion - eine zweite Lese-Logik hier wuerde irgendwann anders lesen.
+ */
 export type ReceiptPatch = {
+  merchant?: string | null;
+  receiptDate?: string | null;
+  totalAmount?: string | null;
+  currency?: string | null;
+  vatAmount?: string | null;
+  paymentMethod?: string | null;
   category?: string | null;
   receiptType?: string | null;
+  reason?: string | null;
 };
 
 /**
  * Korrektur speichern.
  *
- * Nur Kategorie und Belegart: das sind die beiden Felder, die der
- * Extraktions-Agent bewusst leer laesst ("Categorizing expenses is not your
- * job") und die deshalb ein Mensch setzen muss. Betrag, Datum und Waehrung
- * werden im Teams-Dialog bestaetigt - dort liegt das Belegbild daneben, und
- * eine zweite Korrekturstelle waere ein zweiter Weg zu derselben Zahl.
+ * Kategorie und Belegart setzt immer ein Mensch (der Extraktions-Agent laesst
+ * sie bewusst leer). Die Fachwerte korrigiert er, wo die Extraktion falsch
+ * gelesen hat - oder wo er sich bei einer Ausgabe ohne Beleg vertippt hat.
+ * Ob eine Aenderung als Korrektur zaehlt (corrected_at), entscheidet der
+ * Dienst: nur wenn sich ein Fachwert tatsaechlich aendert.
  */
 export async function patchReceipt(id: string, patch: ReceiptPatch): Promise<ApiReceipt> {
   const payload = await apiRequest<{ receipt: ApiReceipt }>(`/receipts/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    // null -> Leerstring: der Dienst nimmt z.string() und wuerde null
-    // abweisen. Leer bedeutet "nicht gesetzt", und genau das soll es.
+    // null -> Leerstring: der Dienst nimmt Strings und macht aus leer NULL.
+    // Leer bedeutet "nicht gesetzt", und genau das soll es.
     body: Object.fromEntries(
       Object.entries(patch)
         .filter(([, value]) => value !== undefined)
         .map(([key, value]) => [key, value ?? ""]),
     ),
+  });
+  return payload.receipt;
+}
+
+/** Eine Ausgabe ohne Beleg. Werte roh, wie getippt - gelesen wird im Dienst. */
+export type ManualReceiptInput = {
+  /** Beim Rendern des Formulars vergeben; macht ein doppeltes Absenden harmlos. */
+  id: string;
+  merchant: string;
+  receiptDate: string;
+  totalAmount: string;
+  currency: string;
+  category: string;
+  reason: string;
+};
+
+/**
+ * Ausgabe ohne Beleg anlegen. Idempotent ueber `id`: ein zweites Absenden
+ * liefert dieselbe Zeile zurueck, statt eine zweite anzulegen.
+ */
+export async function createManualReceipt(input: ManualReceiptInput): Promise<ApiReceipt> {
+  const payload = await apiRequest<{ receipt: ApiReceipt }>("/receipts/manual", {
+    method: "POST",
+    body: input,
   });
   return payload.receipt;
 }

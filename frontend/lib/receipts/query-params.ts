@@ -18,6 +18,13 @@ export const SORT_FIELDS = ["receiptDate", "totalAmount", "createdAt", "merchant
 export type SortField = (typeof SORT_FIELDS)[number];
 export type SortDirection = "asc" | "desc";
 
+/**
+ * Herkunft: mit Beleg (aus Teams) oder ohne (im Web selbst erfasst).
+ * Leer heisst "beides". Die Werte sind die des Dienstes.
+ */
+export const SOURCES = ["receipt", "none"] as const;
+export type Source = (typeof SOURCES)[number];
+
 export const PAGE_SIZES = [25, 50, 100, 200] as const;
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -32,6 +39,8 @@ export type ReceiptQuery = {
   period: Period;
   /** Exakte Kategorie. Leer heisst "alle", nicht "ohne Kategorie". */
   category: string;
+  /** Mit oder ohne Beleg. Leer heisst "beides". */
+  source: Source | "";
   sort: SortField;
   dir: SortDirection;
   page: number;
@@ -50,6 +59,7 @@ export const QUERY_PARAM_KEYS = [
   "q",
   "period",
   "category",
+  "source",
   "sort",
   "dir",
   "page",
@@ -95,6 +105,9 @@ export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
   const pageSizeRaw = Number(readOne(input, "pageSize"));
   const pageSize = PAGE_SIZES.find((size) => size === pageSizeRaw) ?? DEFAULT_PAGE_SIZE;
 
+  const sourceRaw = readOne(input, "source");
+  const source = SOURCES.find((value) => value === sourceRaw) ?? "";
+
   const pageRaw = Number(readOne(input, "page"));
   const page = Number.isInteger(pageRaw) && pageRaw > 0 ? pageRaw : 1;
 
@@ -102,6 +115,7 @@ export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
     q: readOne(input, "q") ?? "",
     period,
     category: readOne(input, "category") ?? "",
+    source,
     sort,
     dir: readOne(input, "dir") === "asc" ? "asc" : "desc",
     page,
@@ -136,7 +150,7 @@ export function serializeReceiptQuery(
   overrides: Partial<ReceiptQuery> = {},
 ): string {
   const resetsPage = Object.keys(overrides).some((key) =>
-    ["q", "period", "category", "pageSize", "sort", "dir"].includes(key),
+    ["q", "period", "category", "source", "pageSize", "sort", "dir"].includes(key),
   );
   const merged = { ...query, ...overrides, ...(resetsPage ? { page: 1 } : {}) };
   const params = new URLSearchParams();
@@ -144,6 +158,7 @@ export function serializeReceiptQuery(
   if (merged.q) params.set("q", merged.q);
   if (merged.period !== DEFAULT_PERIOD) params.set("period", merged.period);
   if (merged.category) params.set("category", merged.category);
+  if (merged.source) params.set("source", merged.source);
   if (merged.sort !== "receiptDate") params.set("sort", merged.sort);
   if (merged.dir !== "desc") params.set("dir", merged.dir);
   if (merged.pageSize !== DEFAULT_PAGE_SIZE) params.set("pageSize", String(merged.pageSize));
@@ -154,5 +169,10 @@ export function serializeReceiptQuery(
 
 /** True, wenn ueberhaupt ein Filter gesetzt ist - unterscheidet die Empty States. */
 export function hasActiveFilter(query: ReceiptQuery): boolean {
-  return query.q !== "" || query.category !== "" || query.period !== DEFAULT_PERIOD;
+  return (
+    query.q !== "" ||
+    query.category !== "" ||
+    query.source !== "" ||
+    query.period !== DEFAULT_PERIOD
+  );
 }

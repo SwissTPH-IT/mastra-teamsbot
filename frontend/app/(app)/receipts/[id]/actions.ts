@@ -1,12 +1,18 @@
 "use server";
 
-// Die einzige schreibende Stelle der Oberflaeche.
+// Nachtraegliche Korrektur eines erfassten Belegs.
 //
-// Kategorie und Belegart sind die beiden Felder, die der Extraktions-Agent
-// bewusst leer laesst ("Categorizing expenses is not your job") - sie muessen
-// also hier gesetzt werden koennen. Betrag, Datum und Waehrung bleiben dem
-// Teams-Dialog vorbehalten: dort liegt das Belegbild daneben, und zwei Wege zu
-// derselben Zahl sind einer zu viel.
+// Zwei Arten von Feldern gehen hier durch:
+//
+//   - Kategorie und Belegart, die der Extraktions-Agent bewusst leer laesst
+//     ("Categorizing expenses is not your job") und die ein Mensch setzt.
+//   - Die Fachwerte (Haendler, Datum, Betrag, Waehrung, MwSt., Zahlungsart,
+//     bei Ausgaben ohne Beleg die Begruendung). Die Extraktion liest manchmal
+//     falsch, und im Teams-Dialog sind nur vier Felder bestaetigbar - ohne
+//     diesen Weg bliebe ein falsch gelesener Haendler fuer immer stehen.
+//
+// Gelesen werden die Werte im Dienst, mit denselben Parsern wie bei der
+// Extraktion ("42,10", "14.03.2026"). Hier wird nichts interpretiert.
 //
 // Geschrieben wird ueber den Dienst (PATCH /receipts/:id), nicht in die
 // Datenbank. Die Zeile wird dort auf (id, user_id) gematcht - eine geratene id
@@ -14,10 +20,25 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { patchReceipt } from "@/lib/api/receipts";
-import { isAuthError, isNotFound, isUnlinkedAccount } from "@/lib/api/client";
+import { patchReceipt, type ReceiptPatch } from "@/lib/api/receipts";
+import { isAuthError, isNotFound, isRejected, isUnlinkedAccount } from "@/lib/api/client";
+import { describeRejection, submittedValues, type FormState } from "@/lib/receipts/form-state";
 
-export type SaveState = { ok: true } | { ok: false; message: string } | null;
+/**
+ * Die Felder, die das Formular schicken darf. Alles andere im FormData wird
+ * ignoriert - ein von Hand ergaenztes Feld soll nicht bis zum Dienst kommen.
+ */
+const PATCH_FIELDS = [
+  "merchant",
+  "receiptDate",
+  "totalAmount",
+  "currency",
+  "vatAmount",
+  "paymentMethod",
+  "category",
+  "receiptType",
+  "reason",
+] as const satisfies readonly (keyof ReceiptPatch)[];
 
 /**
  * Korrektur speichern.
@@ -25,34 +46,48 @@ export type SaveState = { ok: true } | { ok: false; message: string } | null;
  * Nimmt FormData statt getippter Argumente, damit das Formular ohne
  * JavaScript funktioniert: das Feld liegt im Formular, der Browser schickt es,
  * die Action liest es. Ein Client-Handler waere hier nur Zierde.
+ *
+ * Geschickt wird nur, was im Formular steht: die Begruendung gibt es nur bei
+ * Ausgaben ohne Beleg, MwSt. und Zahlungsart nur bei Belegen. Ein fehlendes
+ * Feld heisst "nicht angefasst", ein leeres heisst "entfernen".
  */
-export async function saveCorrections(_previous: SaveState, form: FormData): Promise<SaveState> {
+export async function saveCorrections(_previous: FormState, form: FormData): Promise<FormState> {
   const id = String(form.get("id") ?? "");
-  if (!id) return { ok: false, message: "Missing receipt id." };
+  const values = submittedValues(form);
+  if (!id) return { ok: false, message: "Missing receipt id.", fieldErrors: {}, values };
 
-  // Leerstring heisst "nicht gesetzt" und wird im Dienst zu NULL - dieselbe
-  // Regel wie bei der Extraktion. Ohne sie stuende in category ein
-  // Leerstring, der in jeder Liste als vergebene Kategorie mitzaehlt.
-  const patch = {
-    category: String(form.get("category") ?? ""),
-    receiptType: String(form.get("receiptType") ?? ""),
-  };
+  const patch: ReceiptPatch = {};
+  for (const field of PATCH_FIELDS) {
+    if (form.has(field)) patch[field] = String(form.get(field) ?? "");
+  }
 
   try {
     await patchReceipt(id, patch);
   } catch (error) {
     if (isAuthError(error)) redirect("/signin");
-    if (isNotFound(error)) return { ok: false, message: "This receipt no longer exists." };
+    if (isRejected(error)) return { ok: false, ...describeRejection(error.detail), values };
+    if (isNotFound(error)) {
+      return { ok: false, message: "This receipt no longer exists.", fieldErrors: {}, values };
+    }
     if (isUnlinkedAccount(error)) {
-      return { ok: false, message: "This account is not linked to any receipts." };
+      return {
+        ok: false,
+        message: "This account is not linked to any receipts.",
+        fieldErrors: {},
+        values,
+      };
     }
     console.error("[frontend] Korrektur fehlgeschlagen:", error);
-    return { ok: false, message: "Could not save — the receipt service did not accept it." };
+    return {
+      ok: false,
+      message: "Could not save — the receipt service did not accept it.",
+      fieldErrors: {},
+      values,
+    };
   }
 
-  // Beide Ansichten: die Detailseite zeigt die neuen Werte, und in der Liste
-  // aendert sich die Kategoriespalte samt Filter-Dropdown.
-  revalidatePath(`/receipts/${id}`);
-  revalidatePath("/receipts");
+  // Detailseite, Liste (Betrag, Kategorie, Filter-Dropdown) und die Kennzahl
+  // auf der Startseite - "layout" erfasst alle darunter liegenden Seiten.
+  revalidatePath("/", "layout");
   return { ok: true };
 }

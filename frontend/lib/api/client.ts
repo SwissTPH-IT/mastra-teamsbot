@@ -41,10 +41,21 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /**
+     * Maschinenlesbarer Zusatz des Dienstes: `code` benennt eine Fachregel
+     * (z. B. "no_receipt_limit"), `fields` die abgelehnten Eingabefelder. Die
+     * Oberflaeche formuliert damit selbst - der Text in `message` ist Deutsch.
+     */
+    readonly detail: { code?: string; fields?: string[] } = {},
   ) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** Der Dienst hat Eingaben abgelehnt (400). */
+export function isRejected(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 400;
 }
 
 /** Nicht angemeldet, oder die Session traegt keine oid. */
@@ -138,10 +149,12 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     // Der Dienst antwortet einheitlich mit { error: "<Text>" }. Der Text ist
     // Deutsch (so ist der Dienst gebaut) und wird deshalb NICHT durchgereicht,
     // wo die Oberflaeche selbst erklaeren kann - siehe die Empty States.
-    const message =
-      (payload as { error?: string } | undefined)?.error ??
-      `HTTP ${response.status} ${response.statusText}`;
-    throw new ApiError(response.status, message);
+    const body = payload as { error?: string; code?: string; fields?: string[] } | undefined;
+    const message = body?.error ?? `HTTP ${response.status} ${response.statusText}`;
+    throw new ApiError(response.status, message, {
+      code: typeof body?.code === "string" ? body.code : undefined,
+      fields: Array.isArray(body?.fields) ? body.fields : undefined,
+    });
   }
 
   return payload as T;

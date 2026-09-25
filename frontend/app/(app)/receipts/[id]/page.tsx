@@ -26,6 +26,7 @@ import {
   formatReceiptDate,
   formatTimestamp,
 } from "@/lib/receipts/format";
+import { NO_RECEIPT_LIMIT, NO_RECEIPT_LIMIT_CURRENCY } from "@/lib/receipts/no-receipt";
 import { needsReview, receiptTitle, sourceLabel } from "@/lib/receipts/review";
 
 export default async function ReceiptDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -71,6 +72,21 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
             <div className="flex flex-col gap-3">
               <div className="border-line-2 bg-surface flex h-[210px] w-full flex-col items-center justify-center gap-[6px] rounded-xl border border-dashed">
                 <div className="text-ink-2 text-sm">No receipt image</div>
+                <div className="text-ink-3 text-[12.5px]">
+                  Entered without a receipt, up to {NO_RECEIPT_LIMIT.toFixed(2)}{" "}
+                  {NO_RECEIPT_LIMIT_CURRENCY}
+                </div>
+              </div>
+              {/* Die Begruendung ist bei einer Ausgabe ohne Beleg das, was der
+                  Beleg sonst waere - deshalb an seinem Platz und nicht in der
+                  Werteliste. */}
+              <div className="border-line bg-panel rounded-xl border p-4">
+                <div className="text-ink-3 mb-2 text-[10.5px] font-semibold tracking-[0.09em] uppercase">
+                  Reason given
+                </div>
+                <div className="text-ink text-sm leading-[1.6] whitespace-pre-line">
+                  {receipt.reason ?? "–"}
+                </div>
               </div>
               <div className="text-ink-3 text-[11.5px]">
                 Self entered · {formatTimestamp(receipt.createdAt)}
@@ -92,6 +108,7 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
               <div className="text-ink-3 mt-[5px] text-[13px]">
                 receiptDate {formatReceiptDate(receipt.receiptDate) ?? "–"} ·{" "}
                 {source === "receipt" ? "receipt from Teams" : "no receipt"}
+                {receipt.correctedAt ? ` · corrected ${formatTimestamp(receipt.correctedAt)}` : ""}
               </div>
             </div>
             <div className="tabular text-2xl font-semibold tracking-[-0.025em]">
@@ -101,14 +118,9 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
 
           {needsReview(receipt) ? <ReviewPanel receipt={receipt} /> : null}
 
-          <CorrectionForm
-            receiptId={receipt.id}
-            category={receipt.category}
-            receiptType={receipt.receiptType}
-            assignmentNote="Not in a settlement yet"
-          />
+          <CorrectionForm receipt={receipt} assignmentNote="Not in a settlement yet" />
 
-          <ExtractedFields receipt={receipt} />
+          {source === "receipt" ? <ExtractedFields receipt={receipt} /> : null}
         </div>
       </div>
     </div>
@@ -162,25 +174,23 @@ function ReviewPanel({ receipt }: { receipt: ApiReceipt }) {
   );
 }
 
-/** Die ausgelesenen Werte, in der Reihenfolge der Vorlage. */
+/**
+ * Die uebrigen ausgelesenen Werte, nur lesbar.
+ *
+ * Korrigierbar sind die Felder im Formular darueber - die, die fuer die
+ * Abrechnung zaehlen. Adresse, Positionen und Steuernummer bleiben hier
+ * sichtbar, aber unveraendert: sie sind Beiwerk, und jedes weitere Eingabefeld
+ * waere eines mehr, das beim Nachsehen im Weg steht.
+ */
 function ExtractedFields({ receipt }: { receipt: ApiReceipt }) {
   const fields: { label: string; value: string | null }[] = [
-    { label: "merchant", value: receipt.merchant },
     { label: "merchantAddress", value: receipt.merchantAddress },
-    { label: "receiptDate", value: formatReceiptDate(receipt.receiptDate) },
     { label: "receiptTime", value: receipt.receiptTime },
-    {
-      label: "totalAmount",
-      value: formatAmountWithCurrency(receipt.totalAmount, receipt.currency),
-    },
     {
       label: "subtotalAmount",
       value: formatAmountWithCurrency(receipt.subtotalAmount, receipt.currency),
     },
-    { label: "vatAmount", value: formatAmountWithCurrency(receipt.vatAmount, receipt.currency) },
     { label: "vatRate", value: formatRate(receipt.vatRate) },
-    { label: "currency", value: receipt.currency },
-    { label: "paymentMethod", value: receipt.paymentMethod },
     { label: "referenceNumber", value: receipt.referenceNumber },
     {
       label: "receiptType",
@@ -197,7 +207,7 @@ function ExtractedFields({ receipt }: { receipt: ApiReceipt }) {
   return (
     <div className="flex flex-col gap-[2px]">
       <div className="text-ink-3 mb-[10px] text-[10.5px] font-semibold tracking-[0.09em] uppercase">
-        Extracted fields
+        Other extracted fields
       </div>
       {fields.map((field) => (
         <div

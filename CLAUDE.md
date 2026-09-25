@@ -90,8 +90,9 @@ Four invariants to preserve:
    `receipts/upload-store.ts`, gets an `uploadId`, and passes only file *paths* onward.
 3. **Nothing is written to the DB before the user confirms.** No write-then-clean-up.
 4. **The frontend has no database.** No pool, no Drizzle, no schema import, no
-   migrations — every byte of receipt data comes from `api/`, and the only thing it
-   writes is `PATCH /receipts/:id` for category and receipt type.
+   migrations — every byte of receipt data comes from `api/`, and the only things it
+   writes are `PATCH /receipts/:id` (corrections) and `POST /receipts/manual`
+   (expense without receipt).
 
 Key pieces (`src/mastra/`):
 
@@ -191,6 +192,10 @@ argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed i
 
 ### Constraints that live in more than one file
 
+- The no-receipt limit (20.00 CHF per item, nominal amount, no FX conversion) is decided in `src/mastra/receipts/no-receipt.ts` and checked by the API on `POST /receipts/manual` **and** on every `PATCH` of a row without a file. `frontend/lib/receipts/no-receipt.ts` only mirrors it for the live hint — change both.
+- Corrections: `updateReceipt()` sets `corrected_at` and recomputes `confidence` only when a fact field actually changes (`CORRECTION_FIELDS`; category/receipt type don't count). `needsReview()` in the frontend returns false once `correctedAt` is set.
+- API rejections carry machine-readable `code` / `fields` next to the German `error` (`api/src/validate.ts`, `ErrorDetail`); the frontend words its English messages from those (`lib/receipts/form-state.ts`) instead of parsing the text.
+
 - Max upload size is asserted in `upload-store.ts`, `server.bodySizeLimit` (`index.ts`), and the Teams handler. Change all of them together.
 - Allowed file types: `ALLOWED_UPLOAD_TYPES` (`upload-store.ts`) and `MIME_BY_EXT` (both `receipt-extraction-workflow.ts` and `server/receipt-routes.ts`). PDF is intentionally excluded — providers reject it as an image part.
 - `MASTRA_MODEL` **must** be vision-capable; a non-vision model fails deep inside the workflow ("No endpoints found that support image input"). `annotateModelError()` in the Teams handler exists to surface which model was configured.
@@ -205,6 +210,7 @@ argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed i
 - The prune service is selected by `RUN_MODE=prune`, not a start command — `scripts/docker-entrypoint.sh` switches roles on that variable, because start commands from platform config were silently not applied in this project while variables demonstrably arrive.
 - The frontend image builds from the **repo root** context (`docker build -f frontend/Dockerfile .`), because `npm ci` needs the root lockfile plus every workspace's `package.json`. It no longer copies `src/db`. `output: standalone` leaves out both `.next/static` and `public/`, so the Dockerfile copies both — without `public/` the wordmark is missing. The root `.dockerignore` therefore no longer excludes `frontend/`, and the agent's Dockerfile copies `frontend/package.json` so `npm ci --workspaces=false` can validate the lockfile.
 - Persistence is split: structured data in Postgres (schemas `mastra` and `app`), receipt *images* still as files under `./data/uploads/`. `receipts.file_reference` holds `local:uploads/<id>` — there is no object store yet, and that prefix scheme exists so adding one is a data migration over one column.
+- `receipts.file_reference IS NULL` **is** "expense without receipt" — there is no separate `source` column that could contradict it. Such rows have no `file_hash`, `raw_extraction` or `confidence`, must have a `reason` (DB `CHECK receipts_reason_without_file`), and are idempotent via the row `id`, which the form assigns at render time (`createManualReceipt()`).
 - `RECEIPT_DATA_DIR` defaults to `/app/data`, so running the backend outside Docker without setting it writes to an absolute container path.
 - Retention policies live in **one** place, `scripts/prune.mjs`, which passes them per call to `storage.prune()`. `src/mastra/storage.ts` deliberately configures none — two definitions would drift.
 

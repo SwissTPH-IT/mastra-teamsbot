@@ -1,9 +1,8 @@
 // Die Startseite: was offen ist, und die fuenf letzten Belege.
 //
-// Aufbau wie in der Vorlage. Zwei Bereiche sind ausgegraut, weil es sie noch
-// nicht gibt - die Abrechnungs-Kacheln und "Add expense without receipt".
-// Sichtbar und erkennbar deaktiviert statt entfernt: so sieht man, wohin das
-// gehoert, ohne es anklicken zu koennen.
+// Aufbau wie in der Vorlage. Die Abrechnungs-Kacheln sind ausgegraut, weil es
+// Abrechnungen noch nicht gibt - sichtbar und erkennbar deaktiviert statt
+// entfernt: so sieht man, wohin das gehoert, ohne es anklicken zu koennen.
 
 import Link from "next/link";
 import { auth } from "@/auth";
@@ -39,18 +38,12 @@ export default async function HomePage() {
           <div className="text-ink-3 mt-[6px] text-[13.5px]">{formatToday()}</div>
         </div>
         <div className="flex gap-[9px]">
-          {/* Selbst eingetragene Kleinbetraege sind entworfen (Betragsgrenze,
-              Begruendungspflicht), aber weder im Schema noch im Dienst
-              vorhanden: app.receipts verlangt Dateireferenz und Datei-Hash.
-              Deshalb deaktiviert und nicht halb gebaut. */}
-          <button
-            type="button"
-            disabled
-            title="Entering expenses without a receipt is not available yet"
-            className="bg-surface text-ink-3 h-10 cursor-not-allowed rounded-[10px] px-4 text-[13.5px] font-medium"
+          <Link
+            href="/receipts/new"
+            className="bg-brand hover:bg-brand-deep flex h-10 items-center rounded-[10px] px-4 text-[13.5px] font-medium text-white"
           >
             Add expense without receipt
-          </button>
+          </Link>
           <TeamsButton />
         </div>
       </div>

@@ -13,10 +13,12 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import {
   countReceipts,
+  createManualReceipt,
   getReceipt,
   listCategories,
   listReceipts,
   RECEIPT_SORT_FIELDS,
+  RECEIPT_SOURCES,
   summarizeReceipts,
   saveReceipt,
   searchReceipts,
@@ -24,9 +26,15 @@ import {
   type ReceiptPatch,
 } from 'mastra-teamsbot/db/receipts';
 import type { ReceiptRow } from 'mastra-teamsbot/db/schema';
-import { candidateSchema } from 'mastra-teamsbot/receipts/candidate';
+import {
+  candidateSchema,
+  parseAmount,
+  parseCurrency,
+  parseDate,
+} from 'mastra-teamsbot/receipts/candidate';
+import { checkNoReceiptAmount, hasReason } from 'mastra-teamsbot/receipts/no-receipt';
 import { subjectOf, type AuthState } from '../auth';
-import { validate } from '../validate';
+import { validate, type ErrorDetail } from '../validate';
 
 type Env = { Variables: { auth: AuthState } };
 
@@ -58,13 +66,64 @@ function toView(row: ReceiptRow) {
      * was nicht rausgeht, muss auch nicht versioniert werden.
      */
     lineItemCount: Array.isArray(row.lineItems) ? row.lineItems.length : 0,
+    /** null heisst "ohne Beleg erfasst" – siehe schema.ts. */
     fileReference: row.fileReference,
+    /** Begründung, warum es keinen Beleg gibt. Nur bei fileReference === null gesetzt. */
+    reason: row.reason,
+    /** Wann ein Mensch zuletzt einen Fachwert berichtigt hat. null: nie. */
+    correctedAt: row.correctedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
 }
 
 const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Datum als YYYY-MM-DD.');
+
+/**
+ * Eingaben eines Menschen, gelesen mit DENSELBEN Parsern wie die Extraktion
+ * (candidate.ts). "42,10", "1'234.50" und "CHF 42.10" gehen damit durch,
+ * "14.03.2026" ebenso wie "2026-03-14".
+ *
+ * Was sich nicht lesen laesst, ist ein Fehler und wird nicht still zu null –
+ * sonst loescht ein Tippfehler einen Betrag. Leer bleibt der Weg, einen Wert
+ * bewusst zu entfernen (siehe emptyToNull unten).
+ */
+const amountInput = z.string().transform((raw, ctx) => {
+  const parsed = parseAmount(raw);
+  // numeric(14,2): alles darueber waere ein 500 aus Postgres statt einer
+  // Meldung. Kein Beleg dieser Anwendung kommt in die Naehe.
+  if (parsed === null || Math.abs(Number(parsed)) >= 1e12) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Betrag nicht lesbar, z. B. 42.10.' });
+    return z.NEVER;
+  }
+  return parsed;
+});
+
+const dateInput = z.string().transform((raw, ctx) => {
+  const parsed = parseDate(raw);
+  // parseDate prueft nur das Muster. Einen 31.02. wuerde erst Postgres
+  // ablehnen – mit einem 500 statt einer Meldung.
+  const real = parsed !== null && new Date(`${parsed}T00:00:00Z`).toISOString().startsWith(parsed);
+  if (!real) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Datum nicht lesbar, z. B. 14.03.2026.' });
+    return z.NEVER;
+  }
+  return parsed;
+});
+
+/** Bekannte Schreibweisen (Fr., €) ueber parseCurrency, sonst ein ISO-Code aus drei Buchstaben. */
+const currencyInput = z.string().transform((raw, ctx) => {
+  const upper = raw.trim().toUpperCase();
+  const parsed = parseCurrency(raw) ?? (/^[A-Z]{3}$/.test(upper) ? upper : null);
+  if (parsed === null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Waehrung als ISO-Code, z. B. CHF.' });
+    return z.NEVER;
+  }
+  return parsed;
+});
+
+/** Freitext mit Obergrenze. Getrimmt, damit "  " nicht als gesetzter Wert zaehlt. */
+const text = (max: number) => z.string().trim().max(max);
 
 const listQuerySchema = z.object({
   q: z.string().min(1).optional(),
@@ -80,6 +139,8 @@ const listQuerySchema = z.object({
    */
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
+  /** "receipt" = mit Beleg aus Teams, "none" = im Web ohne Beleg erfasst. */
+  source: z.enum(RECEIPT_SOURCES).optional(),
   sort: z.enum(RECEIPT_SORT_FIELDS).optional(),
   dir: z.enum(['asc', 'desc']).optional(),
 });
@@ -105,20 +166,51 @@ const createSchema = z.object({
  * mitzaehlt und im Filter-Dropdown als namenlose Zeile auftaucht.
  */
 const emptyToNull = <T extends z.ZodTypeAny>(schema: T) =>
-  z.preprocess(value => (value === '' ? null : value), schema.nullable());
+  z.preprocess(
+    // Auch "   " ist leer: sonst bliebe nach dem Trimmen ein Leerstring stehen.
+    value => (typeof value === 'string' && value.trim() === '' ? null : value),
+    schema.nullable(),
+  );
 
 const patchSchema = z
   .object({
-    merchant: emptyToNull(z.string()),
-    receiptDate: emptyToNull(isoDate),
-    totalAmount: emptyToNull(z.string()),
-    currency: emptyToNull(z.string().length(3)),
-    vatAmount: emptyToNull(z.string()),
-    category: emptyToNull(z.string()),
-    receiptType: emptyToNull(z.string()),
-    paymentMethod: emptyToNull(z.string()),
+    merchant: emptyToNull(text(200)),
+    receiptDate: emptyToNull(dateInput),
+    totalAmount: emptyToNull(amountInput),
+    currency: emptyToNull(currencyInput),
+    vatAmount: emptyToNull(amountInput),
+    category: emptyToNull(text(100)),
+    receiptType: emptyToNull(text(100)),
+    paymentMethod: emptyToNull(text(100)),
+    reason: emptyToNull(text(1000)),
   })
   .partial();
+
+/**
+ * Ausgabe ohne Beleg.
+ *
+ * `id` kommt vom Aufrufer: das Formular bekommt sie beim Rendern, damit ein
+ * zweites Absenden dieselbe Zeile trifft (siehe createManualReceipt). Eine
+ * UUID und nichts anderes – ein frei waehlbarer Schluessel waere ein Weg,
+ * gezielt nach fremden ids zu tasten.
+ */
+const manualSchema = z.object({
+  id: z.string().uuid(),
+  merchant: emptyToNull(text(200)).optional(),
+  receiptDate: dateInput,
+  totalAmount: amountInput,
+  currency: currencyInput,
+  category: emptyToNull(text(100)).optional(),
+  reason: text(1000).min(1, 'Ohne Beleg ist eine Begruendung Pflicht.'),
+});
+
+/** Verstoss gegen die Grenze ohne Beleg – mit Code, damit die Oberflaeche ihn selbst erklaert. */
+function noReceiptViolation(message: string): HTTPException {
+  return new HTTPException(400, {
+    message,
+    cause: { code: 'no_receipt_limit', fields: ['totalAmount'] } satisfies ErrorDetail,
+  });
+}
 
 export const receiptRoutes = new Hono<Env>()
 
@@ -137,6 +229,35 @@ export const receiptRoutes = new Hono<Env>()
       fileReference: body.fileReference,
       rawExtraction: body.rawExtraction ?? body.candidate,
     });
+
+    return c.json({ receipt: toView(row) }, 201);
+  })
+
+  /**
+   * Ausgabe ohne Beleg erfassen.
+   *
+   * Die Betragsgrenze wird hier geprueft und nicht nur im Formular – das
+   * Formular zeigt sie an, entscheiden tut der Dienst.
+   */
+  .post('/manual', validate('json', manualSchema), async c => {
+    const userId = subjectOf(c);
+    const body = c.req.valid('json');
+
+    const violation = checkNoReceiptAmount(body.totalAmount, body.currency);
+    if (violation) throw noReceiptViolation(violation);
+
+    const row = await createManualReceipt(userId, {
+      id: body.id,
+      merchant: body.merchant ?? null,
+      receiptDate: body.receiptDate,
+      totalAmount: body.totalAmount,
+      currency: body.currency,
+      category: body.category ?? null,
+      reason: body.reason,
+    });
+    // Die id gehoert schon jemand anderem. Aussen wie ein Konflikt, ohne zu
+    // sagen, wem – eine UUID kollidiert nicht zufaellig.
+    if (!row) throw new HTTPException(409, { message: 'Diese Erfassung existiert bereits.' });
 
     return c.json({ receipt: toView(row) }, 201);
   })
@@ -200,7 +321,24 @@ export const receiptRoutes = new Hono<Env>()
     const existing = await getReceipt(userId, id);
     if (!existing) throw new HTTPException(404, { message: 'Beleg nicht gefunden.' });
 
-    const row = await updateReceipt(userId, id, c.req.valid('json') as ReceiptPatch);
+    const patch = c.req.valid('json') as ReceiptPatch;
+
+    // Ohne Beleg gilt die Regel auch nach dem Erfassen: sonst wuerde aus
+    // 12.00 per Korrektur 120.00, und die Grenze haette nur das Formular
+    // gesehen. Geprueft wird der Stand NACH dem Patch.
+    if (existing.fileReference === null) {
+      const merged = { ...existing, ...patch };
+      const violation = checkNoReceiptAmount(merged.totalAmount, merged.currency?.trim() ?? null);
+      if (violation) throw noReceiptViolation(violation);
+      if (!hasReason(merged.reason)) {
+        throw new HTTPException(400, {
+          message: 'Ohne Beleg ist eine Begruendung Pflicht.',
+          cause: { code: 'reason_required', fields: ['reason'] } satisfies ErrorDetail,
+        });
+      }
+    }
+
+    const row = await updateReceipt(userId, id, patch);
     if (!row) throw new HTTPException(404, { message: 'Beleg nicht gefunden.' });
 
     return c.json({ receipt: toView(row) });

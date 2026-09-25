@@ -6,6 +6,7 @@
 // `schemaFilter: ['app']` festgenagelt.
 
 import {
+  check,
   char,
   date,
   index,
@@ -43,16 +44,34 @@ export const receipts = appSchema.table(
      */
     userId: text('user_id').notNull(),
 
-    /** sha256 der Originaldatei. Zusammen mit userId der Idempotenz-Key. */
-    fileHash: text('file_hash').notNull(),
+    /**
+     * sha256 der Originaldatei. Zusammen mit userId der Idempotenz-Key.
+     *
+     * NULL bei einer Ausgabe ohne Beleg (im Web selbst erfasst): es gibt keine
+     * Datei, also auch keinen Hash. Der Unique-Index stört dabei nicht –
+     * mehrere NULL kollidieren in Postgres nicht. Die Idempotenz dieser Zeilen
+     * hängt stattdessen an der id, die das Formular vorab vergibt (siehe
+     * createManualReceipt() in src/db/receipts.ts).
+     */
+    fileHash: text('file_hash'),
 
     /**
      * Referenz auf die Originaldatei, NICHT die Datei selbst.
      * Format "<schema>:<pfad>", aktuell nur "local:uploads/<uploadId>".
      * Ein Objektspeicher existiert noch nicht – siehe README, Abschnitt
      * "Offene Lücke: Objektspeicher".
+     *
+     * NULL heisst "ohne Beleg erfasst". Das ist die eine Stelle, an der die
+     * Herkunft steht; eine zusätzliche `source`-Spalte könnte ihr widersprechen.
      */
-    fileReference: text('file_reference').notNull(),
+    fileReference: text('file_reference'),
+
+    /**
+     * Warum es keinen Beleg gibt. Pflicht, wenn fileReference NULL ist (siehe
+     * CHECK unten) – eine Ausgabe ohne Beleg und ohne Begründung ist für die
+     * Buchhaltung nicht prüfbar.
+     */
+    reason: text('reason'),
 
     merchant: text('merchant'),
     merchantAddress: text('merchant_address'),
@@ -86,11 +105,27 @@ export const receipts = appSchema.table(
     lineItems: jsonb('line_items').notNull().default(sql`'[]'::jsonb`),
     issues: jsonb('issues').notNull().default(sql`'[]'::jsonb`),
 
-    /** Der Agent-Output 1:1, inklusive aller NOT_PRESENT/ILLEGIBLE-Marker. */
-    rawExtraction: jsonb('raw_extraction').notNull(),
+    /**
+     * Der Agent-Output 1:1, inklusive aller NOT_PRESENT/ILLEGIBLE-Marker.
+     * NULL ohne Beleg: ohne Bild gab es keine Extraktion, und ein erfundener
+     * Output wäre schlechter als keiner.
+     */
+    rawExtraction: jsonb('raw_extraction'),
 
-    /** Deterministisch berechnet, kein Modellwert. Siehe computeConfidence(). */
+    /**
+     * Deterministisch berechnet, kein Modellwert. Siehe computeConfidence().
+     * NULL ohne Beleg – was ein Mensch eintippt, hat keine Lese-Konfidenz.
+     */
     confidence: numeric('confidence', { precision: 3, scale: 2 }),
+
+    /**
+     * Wann ein Mensch zuletzt einen Fachwert (Händler, Datum, Betrag, …)
+     * nachträglich geändert hat. Kategorie und Belegart zählen nicht – die
+     * setzt ohnehin immer ein Mensch. Ab hier ist der Beleg nachgesehen: die
+     * Hinweise des Extraktions-Agenten bleiben stehen, verlangen aber keine
+     * Kontrolle mehr.
+     */
+    correctedAt: timestamp('corrected_at', { withTimezone: true }),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -102,6 +137,12 @@ export const receipts = appSchema.table(
     uniqueIndex('receipts_user_file_hash_key').on(table.userId, table.fileHash),
     index('receipts_user_date_idx').on(table.userId, table.receiptDate.desc()),
     index('receipts_user_created_idx').on(table.userId, table.createdAt.desc()),
+    // In der Datenbank und nicht nur im Dienst: auch ein künftiger zweiter
+    // Schreibweg kann keine Zeile ohne Beleg UND ohne Begründung anlegen.
+    check(
+      'receipts_reason_without_file',
+      sql`${table.fileReference} is not null or nullif(btrim(${table.reason}), '') is not null`,
+    ),
   ],
 );
 

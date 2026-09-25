@@ -5,7 +5,7 @@
 // an jedes WHERE. Es gibt bewusst keine Variante ohne – der Typ erzwingt sie.
 // Eine fremde receiptId trifft dadurch 0 Zeilen statt einer fremden Zeile.
 
-import { and, eq, gte, ilike, isNotNull, lte, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gte, ilike, isNotNull, isNull, lte, or, sql, type SQL } from 'drizzle-orm';
 import { db } from './index';
 import { pendingReviews, receipts, type PendingReviewRow, type ReceiptRow } from './schema';
 import { computeConfidence, type ReceiptCandidate } from '../mastra/receipts/candidate';
@@ -67,6 +67,63 @@ export async function saveReceipt(userId: string, input: SaveReceiptInput): Prom
   return row;
 }
 
+export type ManualReceiptInput = {
+  /**
+   * Die id der neuen Zeile – vom Aufrufer VORAB vergeben (das Formular bekommt
+   * sie beim Rendern). Das ist der Idempotenz-Key dieses Wegs: ohne Datei gibt
+   * es keinen file_hash, und ein doppelt abgeschicktes Formular (Doppelklick,
+   * Reload nach dem POST, Formular ohne JavaScript) soll dieselbe Zeile treffen
+   * statt eine zweite Ausgabe anzulegen.
+   */
+  id: string;
+  /** Bezeichnung ("Parkgebühr Flughafen"). Steht in der Liste statt eines Händlers. */
+  merchant: string | null;
+  receiptDate: string;
+  totalAmount: string;
+  currency: string;
+  category: string | null;
+  reason: string;
+};
+
+/**
+ * Ausgabe ohne Beleg anlegen.
+ *
+ * Kein Upsert wie bei saveReceipt(): eine zweite Einreichung mit derselben id
+ * ändert nichts, sie liefert die schon angelegte Zeile zurück. Überschreiben
+ * wäre hier falsch – der zweite Klick trägt dieselben Werte oder ältere.
+ *
+ * Gehört die id einem ANDEREN Nutzer (praktisch nur bei einer gezielt
+ * wiederverwendeten id denkbar), trifft das Nachlesen 0 Zeilen und die
+ * Funktion gibt null zurück. Die fremde Zeile bleibt unberührt und unsichtbar.
+ */
+export async function createManualReceipt(
+  userId: string,
+  input: ManualReceiptInput,
+): Promise<ReceiptRow | null> {
+  const [inserted] = await db
+    .insert(receipts)
+    .values({
+      id: input.id,
+      userId,
+      fileHash: null,
+      fileReference: null,
+      rawExtraction: null,
+      // Keine Extraktion, also keine Lese-Konfidenz und keine Hinweise.
+      confidence: null,
+      merchant: input.merchant,
+      receiptDate: input.receiptDate,
+      totalAmount: input.totalAmount,
+      currency: input.currency,
+      category: input.category,
+      receiptType: 'none',
+      reason: input.reason,
+    })
+    .onConflictDoNothing({ target: receipts.id })
+    .returning();
+
+  return inserted ?? getReceipt(userId, input.id);
+}
+
 /** Nach welchen Spalten sortiert werden darf. Keine freie Spaltenwahl von aussen. */
 export const RECEIPT_SORT_FIELDS = [
   'receiptDate',
@@ -83,6 +140,9 @@ const SORT_COLUMNS = {
   merchant: receipts.merchant,
 } as const satisfies Record<ReceiptSortField, unknown>;
 
+export const RECEIPT_SOURCES = ['receipt', 'none'] as const;
+export type ReceiptSource = (typeof RECEIPT_SOURCES)[number];
+
 export type ListReceiptsFilter = {
   limit?: number;
   offset?: number;
@@ -90,6 +150,8 @@ export type ListReceiptsFilter = {
   to?: string;
   /** Exakte Kategorie. Leerstring heisst "kein Filter", nicht "Kategorie leer". */
   category?: string;
+  /** Mit Beleg (aus Teams) oder ohne (im Web selbst erfasst). Fehlt: beides. */
+  source?: ReceiptSource;
   sort?: ReceiptSortField;
   dir?: 'asc' | 'desc';
 };
@@ -135,6 +197,9 @@ function buildConditions(userId: string, filter: Partial<SearchReceiptsFilter>):
   if (filter.category) conditions.push(eq(receipts.category, filter.category));
   if (filter.minAmount) conditions.push(gte(receipts.totalAmount, filter.minAmount));
   if (filter.maxAmount) conditions.push(lte(receipts.totalAmount, filter.maxAmount));
+  // Die Herkunft steht in file_reference und nur dort (siehe schema.ts).
+  if (filter.source === 'receipt') conditions.push(isNotNull(receipts.fileReference));
+  if (filter.source === 'none') conditions.push(isNull(receipts.fileReference));
 
   return conditions;
 }
@@ -267,8 +332,61 @@ export type ReceiptPatch = Partial<
     | 'category'
     | 'receiptType'
     | 'paymentMethod'
+    | 'reason'
   >
 >;
+
+/**
+ * Die Felder, deren Änderung als KORREKTUR zählt und `corrected_at` setzt.
+ *
+ * Kategorie und Belegart stehen bewusst nicht drin: die setzt immer ein Mensch,
+ * der Extraktions-Agent lässt sie leer. Sie zu vergeben ist Einordnen, nicht
+ * Berichtigen – danach ist ein unvollständig gelesener Beleg nicht nachgesehen.
+ */
+const CORRECTION_FIELDS = [
+  'merchant',
+  'receiptDate',
+  'totalAmount',
+  'currency',
+  'vatAmount',
+  'paymentMethod',
+  'reason',
+] as const satisfies readonly (keyof ReceiptPatch)[];
+
+/**
+ * Die Zeile als Kandidat, um die Confidence nach einer Korrektur neu zu
+ * rechnen. Dieselbe Funktion wie bei der Extraktion – die Zahl bedeutet damit
+ * weiterhin "wie vollständig ist dieser Beleg", nur auf dem korrigierten Stand.
+ */
+function rowAsCandidate(row: ReceiptRow): ReceiptCandidate {
+  return {
+    merchant: row.merchant,
+    merchantAddress: row.merchantAddress,
+    merchantTaxId: row.merchantTaxId,
+    receiptDate: row.receiptDate,
+    receiptTime: row.receiptTime,
+    referenceNumber: row.referenceNumber,
+    totalAmount: row.totalAmount,
+    subtotalAmount: row.subtotalAmount,
+    discountAmount: row.discountAmount,
+    vatAmount: row.vatAmount,
+    vatRate: row.vatRate,
+    currency: row.currency?.trim() ?? null,
+    paymentMethod: row.paymentMethod,
+    receiptType: row.receiptType,
+    category: row.category,
+    lineItems: Array.isArray(row.lineItems) ? (row.lineItems as ReceiptCandidate['lineItems']) : [],
+    issues: Array.isArray(row.issues) ? (row.issues as string[]) : [],
+  };
+}
+
+/** Numerische Spalten kommen als "42.10", der Patch vielleicht als "42.1" – Wert vergleichen. */
+function sameValue(field: keyof ReceiptPatch, before: unknown, after: unknown): boolean {
+  if (before === null || after === null) return before === after;
+  if (field === 'totalAmount' || field === 'vatAmount') return Number(before) === Number(after);
+  if (field === 'currency') return String(before).trim() === String(after).trim();
+  return before === after;
+}
 
 /**
  * Korrektur an einem bereits gespeicherten Beleg.
@@ -276,22 +394,56 @@ export type ReceiptPatch = Partial<
  * Das `eq(receipts.userId, userId)` im WHERE ist nicht optional: ohne es könnte
  * ein Nutzer über eine erratene id einen fremden Beleg ändern. Mit ihm trifft
  * die Query 0 Zeilen und die Funktion gibt null zurück.
+ *
+ * Ändert sich ein Fachwert tatsächlich, werden zwei Dinge mitgeschrieben:
+ * `corrected_at` (ab hier gilt der Beleg als nachgesehen) und – bei Belegen mit
+ * Datei – die neu gerechnete Confidence. Ein "Speichern" ohne Änderung zählt
+ * nicht als Korrektur; sonst würde jedes Setzen der Kategorie im selben
+ * Formular den Prüfhinweis wegklicken.
  */
 export async function updateReceipt(
   userId: string,
   receiptId: string,
   patch: ReceiptPatch,
 ): Promise<ReceiptRow | null> {
-  const fields = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+  const fields = Object.fromEntries(
+    Object.entries(patch).filter(([, v]) => v !== undefined),
+  ) as ReceiptPatch;
   if (Object.keys(fields).length === 0) return getReceipt(userId, receiptId);
 
-  const [row] = await db
-    .update(receipts)
-    .set({ ...fields, updatedAt: sql`now()` })
-    .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
-    .returning();
+  return db.transaction(async tx => {
+    // FOR UPDATE: Confidence und corrected_at hängen am Stand VOR dem Patch.
+    // Zwei gleichzeitige Korrekturen sollen nacheinander rechnen, nicht beide
+    // auf demselben alten Stand.
+    const [existing] = await tx
+      .select()
+      .from(receipts)
+      .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
+      .for('update')
+      .limit(1);
+    if (!existing) return null;
 
-  return row ?? null;
+    const corrected = CORRECTION_FIELDS.some(
+      field => field in fields && !sameValue(field, existing[field], fields[field]),
+    );
+
+    const derived: Partial<Pick<ReceiptRow, 'confidence'>> & { correctedAt?: SQL } = {};
+    if (corrected) {
+      derived.correctedAt = sql`now()`;
+      // Ohne Datei gibt es keine Lese-Konfidenz – dann bleibt sie NULL.
+      if (existing.fileReference !== null) {
+        derived.confidence = computeConfidence(rowAsCandidate({ ...existing, ...fields }));
+      }
+    }
+
+    const [row] = await tx
+      .update(receipts)
+      .set({ ...fields, ...derived, updatedAt: sql`now()` })
+      .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
+      .returning();
+
+    return row ?? null;
+  });
 }
 
 export async function getReceipt(userId: string, receiptId: string): Promise<ReceiptRow | null> {

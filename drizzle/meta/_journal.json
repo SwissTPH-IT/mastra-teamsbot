@@ -15,6 +15,13 @@
       "when": 1789735784074,
       "tag": "0001_young_lockjaw",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790332345000,
+      "tag": "0002_manual_entries_corrections",
+      "breakpoints": true
     }
   ]
 }

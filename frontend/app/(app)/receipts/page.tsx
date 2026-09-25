@@ -5,6 +5,7 @@
 // filtert selbst - eine im Browser gefilterte Tabelle zeigt bei 200 Zeilen pro
 // Seite etwas anderes als die Trefferzahl daneben.
 
+import Link from "next/link";
 import { Suspense } from "react";
 import { FilterBar } from "@/components/receipts/filter-bar";
 import { Pagination } from "@/components/receipts/pagination";
@@ -119,14 +120,12 @@ function Header({ summary, query }: { summary: string; query?: ReceiptQuery }) {
             Export CSV
           </a>
         ) : null}
-        <button
-          type="button"
-          disabled
-          title="Entering expenses without a receipt is not available yet"
-          className="bg-surface text-ink-3 h-10 cursor-not-allowed rounded-[10px] px-4 text-[13.5px] font-medium"
+        <Link
+          href="/receipts/new"
+          className="bg-brand hover:bg-brand-deep flex h-10 items-center rounded-[10px] px-4 text-[13.5px] font-medium text-white"
         >
           Add expense without receipt
-        </button>
+        </Link>
       </div>
     </div>
   );

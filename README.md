@@ -20,7 +20,7 @@ des Modells kann keine Query ausführen, die es nicht gibt. Das Schema `mastra`
 | | Wer | Was | Mandantentrennung |
 |---|---|---|---|
 | **Microsoft Teams** | Endnutzer | Beleg einreichen, Vorschlag per Karte bestätigen oder anpassen | hart verdrahtet: jeder sieht nur seine eigenen Belege |
-| **Weboberfläche** | Endnutzer | eigene Belege ansehen, prüfen, Kategorie und Belegart setzen, als CSV exportieren | über den API-Dienst: die Entra-`oid` aus der Session wird zur Teams-userId aufgelöst |
+| **Weboberfläche** | Endnutzer | eigene Belege ansehen, prüfen, nachträglich korrigieren, Kleinbeträge ohne Beleg erfassen, als CSV exportieren | über den API-Dienst: die Entra-`oid` aus der Session wird zur Teams-userId aufgelöst |
 
 Erfasst wird ausschliesslich über Teams. Die Weboberfläche verlangt eine
 **Anmeldung über Entra** und hat **keine Datenbankverbindung** – sie liest alles
@@ -150,8 +150,8 @@ Migrationen bleiben hier.
 ### Frontend (`frontend/`)
 
 Die Spesen-Selbstverwaltung: nach dem Entra-Login sieht jeder **seine eigenen**
-Belege, prüft die ausgelesenen Werte, setzt Kategorie und Belegart und exportiert
-als CSV. Grundlage ist das Mockup `dev/Swiss TPH Expenses.html`; umgesetzt ist
+Belege, prüft und korrigiert die ausgelesenen Werte, erfasst Kleinbeträge ohne
+Beleg (bis 20.00 CHF, mit Begründung) und exportiert als CSV. Grundlage ist das Mockup `dev/Swiss TPH Expenses.html`; umgesetzt ist
 daraus der Belegteil, die Abrechnungen sind sichtbar ausgegraut. Details in
 `frontend/README.md`; hier nur die Einordnung.
 
@@ -181,10 +181,12 @@ Vier Dinge, die dabei absichtlich so sind:
 - **Kein assistant-ui, kein Chat, kein LLM-Aufruf.** Auf dieser Seite des Flows
   gibt es keinen AI-Use-Case; eine Chat-Oberfläche zwischen Nutzer und Tabelle
   macht das Filtern langsamer, nicht schneller.
-- **Genau eine schreibende Stelle:** Kategorie und Belegart (`PATCH
-  /receipts/:id`). Die beiden lässt der Extraktions-Agent bewusst leer. Betrag,
-  Datum und Währung bleiben dem Teams-Dialog vorbehalten, wo das Belegbild
-  daneben liegt.
+- **Zwei schreibende Stellen, beide über den Dienst:** Korrekturen (`PATCH
+  /receipts/:id` – Kategorie, Belegart und die Fachwerte Händler, Datum, Betrag,
+  Währung, MwSt., Zahlungsart) und Ausgaben ohne Beleg (`POST /receipts/manual`).
+  Gelesen werden die Eingaben im Dienst, mit denselben Parsern wie bei der
+  Extraktion. Die 20-CHF-Grenze ohne Beleg entscheidet ebenfalls der Dienst
+  (`src/mastra/receipts/no-receipt.ts`), beim Erfassen und bei jeder Korrektur.
 
 Damit sind zwei Backend-Bausteine derzeit **ohne Aufrufer**: `chatRoute()` mit
 `receiptChatAgent`/`extract-receipt-tool` und `POST /receipts/upload`. Beide sind
@@ -464,7 +466,8 @@ Funktion entfernt.
 |---|---|
 | `POST /receipts` | `create-receipt`, und der Schritt `persist-receipt` im Review-Workflow |
 | `GET /receipts` | `list-receipts` (ohne `q`), `search-receipts` (mit `q`) |
-| `PATCH /receipts/:id` | `update-receipt` |
+| `PATCH /receipts/:id` | `update-receipt`, die Korrektur in der Weboberfläche |
+| `POST /receipts/manual` | nur die Weboberfläche (Ausgabe ohne Beleg) |
 | `PUT /identity` | der Teams-Handler, bei jeder Nachricht |
 
 Direkt über Drizzle laufen im Agenten nur noch zwei Dinge, beide bewusst:

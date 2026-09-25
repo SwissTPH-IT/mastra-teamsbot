@@ -13,7 +13,8 @@
     "./db/users": "./src/db/users.ts",
     "./db/pool": "./src/db/pool.ts",
     "./db": "./src/db/index.ts",
-    "./receipts/candidate": "./src/mastra/receipts/candidate.ts"
+    "./receipts/candidate": "./src/mastra/receipts/candidate.ts",
+    "./receipts/no-receipt": "./src/mastra/receipts/no-receipt.ts"
   },
   "scripts": {
     "dev": "mastra dev",

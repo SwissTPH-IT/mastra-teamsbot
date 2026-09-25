@@ -26,6 +26,10 @@ import type { ApiReceipt } from "../api/receipts";
 export const REVIEW_CONFIDENCE_THRESHOLD = 0.6;
 
 export function needsReview(receipt: ApiReceipt): boolean {
+  // Ein Mensch hat die Werte nachtraeglich berichtigt: ab da ist der Beleg
+  // nachgesehen. Die Hinweise des Agenten bleiben sichtbar (sie sagen, wo das
+  // Bild schwierig war), verlangen aber keine Kontrolle mehr.
+  if (receipt.correctedAt) return false;
   if (receipt.issues.length > 0) return true;
   const confidence = receipt.confidence === null ? null : Number(receipt.confidence);
   return (
@@ -36,10 +40,9 @@ export function needsReview(receipt: ApiReceipt): boolean {
 /**
  * Die Herkunft, wie sie in der Spalte "Source" steht.
  *
- * Heute hat jeder Beleg eine Datei - erfasst wird ausschliesslich in Teams,
- * und ohne Bild gibt es keine Extraktion. Die Spalte bleibt trotzdem, weil die
- * Vorlage den Fall "no receipt" vorsieht (selbst eingetragene Kleinbetraege)
- * und sie dann ohne Umbau richtig ist.
+ * "receipt": in Teams mit Bild erfasst. "no receipt": im Web selbst
+ * eingetragen (Kleinbetrag mit Begruendung). Entschieden wird allein an der
+ * Dateireferenz - dieselbe Regel wie im Dienst (Filter `source`).
  */
 export function sourceLabel(receipt: ApiReceipt): "receipt" | "no receipt" {
   return receipt.fileReference ? "receipt" : "no receipt";

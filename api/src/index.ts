@@ -19,6 +19,7 @@ import { closePool } from 'mastra-teamsbot/db/pool';
 import { authenticate, type AuthState } from './auth';
 import { identityRoutes } from './routes/identity';
 import { receiptRoutes } from './routes/receipts';
+import { errorDetail } from './validate';
 
 type Env = { Variables: { auth: AuthState } };
 
@@ -85,7 +86,7 @@ app.get('/healthz', async c => {
  */
 app.onError((error, c) => {
   if (error instanceof HTTPException) {
-    return c.json({ error: error.message }, error.status);
+    return c.json({ error: error.message, ...errorDetail(error) }, error.status);
   }
   console.error('[api] Unerwarteter Fehler:', error);
   return c.json({ error: 'Interner Fehler.' }, 500);

@@ -9,16 +9,28 @@
 // Filters ist meistens leer.
 
 import { useRouter } from "next/navigation";
-import { PERIODS, serializeReceiptQuery, type ReceiptQuery } from "@/lib/receipts/query-params";
+import {
+  PERIODS,
+  serializeReceiptQuery,
+  type ReceiptQuery,
+  type Source,
+} from "@/lib/receipts/query-params";
 
 /**
- * Die drei Umschalter, die noch nichts filtern koennen.
- *
- * "Unassigned only" braucht Abrechnungen, "With/Without receipt" braucht
- * selbst eingetragene Belege - beides gibt es nicht. Sie stehen hier, weil die
- * Vorlage sie vorsieht und ihr Platz in der Zeile sonst zweimal wandert.
+ * "Unassigned only" kann noch nichts filtern: dafuer braucht es Abrechnungen.
+ * Er steht hier, weil die Vorlage ihn vorsieht und sein Platz in der Zeile
+ * sonst wandert, sobald es sie gibt.
  */
-const PENDING_TOGGLES = ["Unassigned only", "With receipt", "Without receipt"] as const;
+const PENDING_TOGGLES = ["Unassigned only"] as const;
+
+/**
+ * Mit oder ohne Beleg. Wie in der Vorlage schliessen sich die beiden aus: ein
+ * zweiter Klick auf den aktiven Umschalter hebt den Filter wieder auf.
+ */
+const SOURCE_TOGGLES: { value: Source; label: string }[] = [
+  { value: "receipt", label: "With receipt" },
+  { value: "none", label: "Without receipt" },
+];
 
 const SELECT_CLASS =
   "border-line-2 bg-panel text-ink h-9 cursor-pointer appearance-none rounded-[10px] border pr-[34px] pl-[10px] text-[13px]";
@@ -86,12 +98,31 @@ export function FilterBar({
           key={label}
           type="button"
           disabled
-          title="Not available yet - needs settlements and self-entered expenses"
+          title="Not available yet - needs settlements"
           className="border-line bg-surface text-ink-3 h-9 cursor-not-allowed rounded-[10px] border px-[13px] text-[13px] opacity-60"
         >
           {label}
         </button>
       ))}
+
+      {SOURCE_TOGGLES.map((toggle) => {
+        const active = query.source === toggle.value;
+        return (
+          <button
+            key={toggle.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => go({ source: active ? "" : toggle.value })}
+            className={`h-9 rounded-[10px] border px-[13px] text-[13px] ${
+              active
+                ? "border-brand bg-brand-soft text-brand-deep"
+                : "border-line bg-panel text-ink-2 hover:bg-surface"
+            }`}
+          >
+            {toggle.label}
+          </button>
+        );
+      })}
 
       <span className="text-ink-3 ml-1 text-xs">Period applies to the receipt date</span>
 
