@@ -23,6 +23,9 @@ export async function GET() {
     await pingApi();
     return NextResponse.json({ status: "ok", api: "up" });
   } catch (error) {
+    // Railway loggt den Antwort-Body nicht - ohne diese Zeile steht im
+    // Deploy-Log nur "Ready" und der Grund fuer die 503 ist unsichtbar.
+    console.error("[healthz] Belegdienst nicht erreichbar:", error);
     return NextResponse.json(
       {
         status: "degraded",
