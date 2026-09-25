@@ -38,6 +38,10 @@ export default defineRailway(() => {
     deploy: { healthcheckPath: "/healthz", healthcheckTimeout: 60, restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5 },
     replicas: { [REGION]: 1 },
     env: {
+      // Fest, weil Agent und Frontend den Port in API_URL fest verdrahten.
+      // Ohne das setzt Railway PORT=8080 und die :4000 zeigt ins Leere. Kein
+      // Risiko: der Dienst hat keine oeffentliche Domain mit targetPort.
+      PORT: "4000",
       DATABASE_URL: Postgres.env.DATABASE_URL,
       DB_POOL_MAX: "5",
       // Das gemeinsame Geheimnis mit dem Agenten. preserve(): nie im Repo.
@@ -92,7 +96,10 @@ export default defineRailway(() => {
       // welcher es ist, bestimmt die oid aus der Session (X-Subject-Aad).
       API_SERVICE_TOKEN: preserve(),
       // Nur fuer die Belegbilder, die als Dateien am Volume des Agenten liegen.
-      MASTRA_URL: `http://\${{${mastraAgent.name}.RAILWAY_PRIVATE_DOMAIN}}:4111`,
+      // 8080, nicht 4111: der Agent hoert auf Railways PORT, und seine
+      // oeffentliche Domain (Teams-Webhook) haengt mit targetPort 8080 daran -
+      // PORT dort umzustellen wuerde den Webhook abhaengen.
+      MASTRA_URL: `http://\${{${mastraAgent.name}.RAILWAY_PRIVATE_DOMAIN}}:8080`,
       // Anmeldung ueber Entra. AUTH_URL muss die oeffentliche URL sein: hinter
       // Railways Proxy baut Auth.js die Redirect-URI sonst aus dem internen
       // Host, und der Rueckweg von Microsoft landet im Leeren.
