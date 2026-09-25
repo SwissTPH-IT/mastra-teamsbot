@@ -41,6 +41,8 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Fachlicher Grund, wenn der Dienst einen nennt ("locked", "incomplete", ...). */
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -71,7 +73,7 @@ export function isNotFound(error: unknown): boolean {
 }
 
 type RequestOptions = {
-  method?: "GET" | "PATCH" | "POST";
+  method?: "GET" | "PATCH" | "POST" | "DELETE";
   query?: Record<string, string | number | undefined | null>;
   body?: unknown;
 };
@@ -138,10 +140,9 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     // Der Dienst antwortet einheitlich mit { error: "<Text>" }. Der Text ist
     // Deutsch (so ist der Dienst gebaut) und wird deshalb NICHT durchgereicht,
     // wo die Oberflaeche selbst erklaeren kann - siehe die Empty States.
-    const message =
-      (payload as { error?: string } | undefined)?.error ??
-      `HTTP ${response.status} ${response.statusText}`;
-    throw new ApiError(response.status, message);
+    const body = payload as { error?: string; code?: string } | undefined;
+    const message = body?.error ?? `HTTP ${response.status} ${response.statusText}`;
+    throw new ApiError(response.status, message, body?.code);
   }
 
   return payload as T;

@@ -16,10 +16,9 @@ type NavItem = {
   label: string;
   badge?: string | null;
   /**
-   * Ausgegraut: die Abrechnungen sind entworfen, aber noch nicht gebaut - es
-   * gibt weder Tabelle noch Endpunkt dafuer. Sichtbar zu lassen ist Absicht:
-   * das ist der Ort, an den sie kommen, und ein verstecktes Feature laesst
-   * beim Nutzer die Frage offen, ob er es nur nicht findet.
+   * Ausgegraut: entworfen, aber noch nicht gebaut. Sichtbar zu lassen ist
+   * Absicht - ein verstecktes Feature laesst beim Nutzer die Frage offen, ob
+   * er es nur nicht findet. Heute betrifft das keinen Eintrag.
    */
   disabled?: boolean;
 };
@@ -51,7 +50,7 @@ export function Sidebar({
       label: "Receipts",
       badge: receiptCount === null ? null : String(receiptCount),
     },
-    { href: "/settlements", label: "Settlements", badge: "Soon", disabled: true },
+    { href: "/settlements", label: "Settlements" },
   ];
 
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
@@ -80,7 +79,7 @@ export function Sidebar({
             <span
               key={item.href}
               aria-disabled="true"
-              title="Settlements are not available yet"
+              title="Not available yet"
               className="text-ink-3 flex h-10 cursor-not-allowed items-center justify-between gap-2 rounded-[10px] px-[10px] text-sm opacity-60"
             >
               <span>{item.label}</span>

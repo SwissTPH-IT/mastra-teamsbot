@@ -151,17 +151,20 @@ Migrationen bleiben hier.
 
 Die Spesen-Selbstverwaltung: nach dem Entra-Login sieht jeder **seine eigenen**
 Belege, prüft die ausgelesenen Werte, setzt Kategorie und Belegart und exportiert
-als CSV. Grundlage ist das Mockup `dev/Swiss TPH Expenses.html`; umgesetzt ist
-daraus der Belegteil, die Abrechnungen sind sichtbar ausgegraut. Details in
+als CSV, bündelt Belege zu Abrechnungen und reicht sie ein. Grundlage ist das
+Mockup `dev/Swiss TPH Expenses.html`; umgesetzt sind der Belegteil und die
+Abrechnungen mit den Zuständen Draft und Submitted – Approved und Query brauchen
+eine Prüfrolle bei Finance und sind sichtbar ausgegraut. Details in
 `frontend/README.md`; hier nur die Einordnung.
 
 | Datei | Zweck |
 |---|---|
 | `auth.ts` | Auth.js v5 mit Entra-Provider, Session mit `oid` |
 | `proxy.ts` | Login-Pflicht, Positivliste des Öffentlichen |
-| `app/(app)/page.tsx` | Startseite: Kennzahl, Abrechnungskacheln (aus), letzte Belege |
+| `app/(app)/page.tsx` | Startseite: Kennzahl, Abrechnungskacheln, letzte Belege |
 | `app/(app)/receipts/page.tsx` | Liste: Filter, Tabelle, Blätterer |
-| `app/(app)/receipts/[id]/page.tsx` | Detail: Bild, Prüfhinweis, Felder, Korrektur |
+| `app/(app)/receipts/[id]/page.tsx` | Detail: Bild, Prüfhinweis, Felder, Korrektur, Zuordnung |
+| `app/(app)/settlements/` | Abrechnungen: Liste, Detail, Server Actions (zuordnen, entfernen, einreichen) |
 | `app/api/export/route.ts` | CSV, serverseitig gestreamt, dieselben Filter wie die Ansicht |
 | `app/api/healthz/route.ts` | Health-Check inklusive Belegdienst, ohne Login |
 | `app/api/receipts/[id]/image/route.ts` | Proxy auf `GET /receipts/:uploadId/file` beim Agenten |
@@ -464,8 +467,22 @@ Funktion entfernt.
 |---|---|
 | `POST /receipts` | `create-receipt`, und der Schritt `persist-receipt` im Review-Workflow |
 | `GET /receipts` | `list-receipts` (ohne `q`), `search-receipts` (mit `q`) |
-| `PATCH /receipts/:id` | `update-receipt` |
+| `PATCH /receipts/:id` | `update-receipt`, die Weboberfläche |
 | `PUT /identity` | der Teams-Handler, bei jeder Nachricht |
+| `GET/POST /settlements`, `GET/PATCH/DELETE /settlements/:id` | die Weboberfläche |
+| `POST /settlements/:id/receipts`, `DELETE /settlements/:id/receipts/:receiptId` | die Weboberfläche (zuordnen / entfernen) |
+| `POST /settlements/:id/submit` | die Weboberfläche (einreichen, danach gesperrt) |
+
+**Abrechnungen** (`app.settlements`, Repository `src/db/settlements.ts`): ein
+Beleg liegt in höchstens einer, deshalb die Spalte `receipts.settlement_id` und
+keine Zwischentabelle. Der Fremdschlüssel läuft über `(settlement_id, user_id)`
+auf `settlements(id, user_id)` – ein Beleg von A kann damit auf Datenbankebene
+nicht in einer Abrechnung von B liegen, unabhängig davon, ob eine Query das
+`user_id` richtig setzt. Eingereicht (`submitted`) heisst gesperrt:
+`receiptIsEditable()` in `src/db/receipts.ts` steht im `WHERE` jeder schreibenden
+Beleg-Query (Korrektur, erneuter Upload derselben Datei, Zuordnung) und liefert
+dort 409 statt einer stillen Änderung. Zeitraum, Anzahl und Summen werden aus
+den Belegen gerechnet, nicht gespeichert.
 
 Direkt über Drizzle laufen im Agenten nur noch zwei Dinge, beide bewusst:
 `app.pending_reviews` (der Zeiger Thread → Run, Zustand des Review-Vorgangs) und

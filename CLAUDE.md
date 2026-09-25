@@ -90,8 +90,9 @@ Four invariants to preserve:
    `receipts/upload-store.ts`, gets an `uploadId`, and passes only file *paths* onward.
 3. **Nothing is written to the DB before the user confirms.** No write-then-clean-up.
 4. **The frontend has no database.** No pool, no Drizzle, no schema import, no
-   migrations — every byte of receipt data comes from `api/`, and the only thing it
-   writes is `PATCH /receipts/:id` for category and receipt type.
+   migrations — every byte of receipt data comes from `api/`, and every write goes
+   through `api/` too: `PATCH /receipts/:id` for category and receipt type, and the
+   `/settlements` endpoints (create, assign, remove, submit, delete draft).
 
 Key pieces (`src/mastra/`):
 
@@ -99,7 +100,7 @@ Key pieces (`src/mastra/`):
 - `workflows/receipt-extraction-workflow.ts` — three steps: read file → data URL, call `receipt-extraction-agent` with `structuredOutput`, write `<RECEIPT_DATA_DIR>/receipts/<id>.json`.
 - `workflows/receipt-review-workflow.ts` — the human-in-the-loop path. `review-candidate` is one step that calls `suspend()` repeatedly: no `resumeData` → present; `confirm` → proceed; `correct` → apply free-text via `receipt-correction-agent`, then present *again*. Candidate + round counter live in workflow state (`setState`), so they land in `mastra_workflow_snapshot` and survive a deploy.
 - `receipts/candidate.ts` — the only place the extraction output is *interpreted*: markers → null, `"CHF 42.10"` → amount + ISO currency, dates → `YYYY-MM-DD`, plus the deterministic `computeConfidence()`.
-- `db/` — `pool.ts` (the single `pg.Pool`), `schema.ts` (Drizzle, all inside `pgSchema('app')`), `receipts.ts` (repository; **every** function takes `userId` first and puts it in every `WHERE`).
+- `db/` — `pool.ts` (the single `pg.Pool`), `schema.ts` (Drizzle, all inside `pgSchema('app')`), `receipts.ts` and `settlements.ts` (repositories; **every** function takes `userId` first and puts it in every `WHERE`). A receipt sits in at most one settlement (`receipts.settlement_id`, no join table). `submitted` locks a settlement: `receiptIsEditable()` is part of the `WHERE` of every receipt write (PATCH, re-upload upsert, assignment), so a locked receipt hits 0 rows and the API answers 409 — the check is in the same statement, never a separate SELECT before. Period, count and sums are computed from the receipts, never stored.
 - `agents/receipt-agent.ts` — vision agent + `receiptSchema` (the source of truth for the receipt shape; every field is a string, with `NOT_PRESENT` / `ILLEGIBLE` markers instead of blanks).
 - `agents/receipt-chat-agent.ts` + `tools/extract-receipt-tool.ts` — the former web chat path; the tool resolves `uploadId`s to paths and runs the workflow sequentially. No caller today (see Notes).
 - `agents/teams-agent.ts` + `channels/teams-receipt-handler.ts` — the Teams path. Message *with* image → start a review run. Message *without* → if `app.pending_reviews` has a row for this thread, it's the answer to a pending presentation (`classifyReply` → `run.resume()`); otherwise `defaultHandler` (the model, with the DB tools).
@@ -163,9 +164,13 @@ the 404 page would go out with status 200. The Suspense boundary sits in
 `app/(app)/receipts/page.tsx` instead.
 
 The UI text is **English**, taken from the `dev/Swiss TPH Expenses.html` mockup;
-comments and error messages stay German like the rest of the repo. Settlements are
-designed but not built, and are visibly greyed out rather than hidden —
-`frontend/README.md` lists every greyed element and every deviation from the mockup.
+comments and error messages stay German like the rest of the repo. Settlements exist
+with two states, `draft` and `submitted`; the mockup's Approved/Query need a Finance
+review role that does not exist, so those tiles are visibly greyed out rather than
+hidden — `frontend/README.md` lists every greyed element and every deviation from the
+mockup. Settlement errors carry a machine `code` (`locked`, `receipts-unavailable`,
+`empty`, `incomplete`) next to the German `error`; the frontend words its English
+message from the code, never from the German text.
 
 ### Routing and API gotchas
 
@@ -188,6 +193,13 @@ designed but not built, and are visibly greyed out rather than hidden —
 (`tools/tool-context.ts`). It is **not** in any tool's `inputSchema`, so the model cannot set it.
 Never add it as a tool input, and never add a repository function that omits the `userId`
 argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed id hits 0 rows.
+
+Settlements add a second layer that does not depend on query code: the foreign key is
+`receipts(settlement_id, user_id) -> settlements(id, user_id)` (hence the
+`UNIQUE (id, user_id)` on settlements). Postgres itself rejects a receipt of A in a
+settlement of B. Keep it composite; a plain FK on `settlement_id` would silently allow
+exactly that. It has no `ON DELETE` (`SET NULL` would also null `user_id`) —
+`deleteSettlement()` unassigns in the same transaction first.
 
 ### Constraints that live in more than one file
 

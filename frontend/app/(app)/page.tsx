@@ -1,9 +1,9 @@
 // Die Startseite: was offen ist, und die fuenf letzten Belege.
 //
-// Aufbau wie in der Vorlage. Zwei Bereiche sind ausgegraut, weil es sie noch
-// nicht gibt - die Abrechnungs-Kacheln und "Add expense without receipt".
-// Sichtbar und erkennbar deaktiviert statt entfernt: so sieht man, wohin das
-// gehoert, ohne es anklicken zu koennen.
+// Aufbau wie in der Vorlage. Ausgegraut ist, was es noch nicht gibt: "Add
+// expense without receipt" und die Kacheln Approved/Query (beide brauchen eine
+// Pruefrolle bei Finance). Sichtbar und erkennbar deaktiviert statt entfernt:
+// so sieht man, wohin das gehoert, ohne es anklicken zu koennen.
 
 import Link from "next/link";
 import { auth } from "@/auth";
@@ -16,11 +16,14 @@ import {
   type ApiReceipt,
   type CurrencySummary,
 } from "@/lib/api/receipts";
+import { fetchSettlements, type ApiSettlement, type SettlementStatus } from "@/lib/api/settlements";
 import { formatAmount, formatToday, greeting } from "@/lib/receipts/format";
 import { parseReceiptQuery } from "@/lib/receipts/query-params";
+import { STATUS_STYLE, addTotals, formatTotals } from "@/lib/settlements/format";
 
-/** Die vier Zustaende einer Abrechnung. Aus der Vorlage, noch ohne Daten. */
-const SETTLEMENT_STATES = ["Draft", "Submitted", "Approved", "Query"] as const;
+/** Die zwei Zustaende aus der Vorlage, die eine Pruefung durch Finance brauchen. */
+const PENDING_STATES = ["Approved", "Query"] as const;
+const LIVE_STATES: SettlementStatus[] = ["draft", "submitted"];
 
 export default async function HomePage() {
   const session = await auth();
@@ -67,7 +70,7 @@ export default async function HomePage() {
         <>
           <div className="grid grid-cols-[minmax(0,340px)_minmax(0,1fr)] items-start gap-7">
             <Unassigned summary={data.summary} />
-            <SettlementTiles />
+            <SettlementTiles settlements={data.settlements} />
           </div>
 
           <div className="flex flex-col gap-3">
@@ -92,9 +95,7 @@ export default async function HomePage() {
 }
 
 /**
- * Die Kennzahl. "Unassigned" ist heute jeder Beleg - es gibt keine
- * Abrechnungen, denen einer zugeordnet sein koennte. Der Wert ist damit
- * richtig, und die Zeile darunter sagt, was er bedeutet.
+ * Die Kennzahl: Belege, die in keiner Abrechnung liegen.
  *
  * Getrennt je Waehrung: CHF und EUR zu addieren ergibt eine Zahl, die nichts
  * bedeutet (siehe summarizeReceipts). Im Normalfall ist es genau eine Zeile.
@@ -130,31 +131,55 @@ function Unassigned({ summary }: { summary: CurrencySummary[] }) {
 }
 
 /**
- * Die Abrechnungs-Kacheln, ausgegraut.
+ * Die Abrechnungs-Kacheln: Summe und Anzahl je Status.
  *
- * Kein Zahlenwert und kein Link: es gibt weder app.expense_reports noch einen
- * Endpunkt dafuer. Eine "0.00" pro Kachel waere die schlechtere Wahl - sie
- * behauptet, es gebe keine Abrechnungen, statt zu sagen, dass es sie noch
- * nicht gibt.
+ * Draft und Submitted mit echten Werten und als Link auf die Liste. Approved
+ * und Query ausgegraut und ohne Zahl: eine "0.00" dort wuerde behaupten, es
+ * gebe keine genehmigten Abrechnungen, statt zu sagen, dass es die Pruefung
+ * noch nicht gibt.
  */
-function SettlementTiles() {
+function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
   return (
     <div className="flex flex-col gap-3">
-      <div className="text-ink-3 flex items-baseline gap-2 text-[10.5px] font-semibold tracking-[0.09em] uppercase">
+      <div className="text-ink-3 text-[10.5px] font-semibold tracking-[0.09em] uppercase">
         Settlements
-        <span className="bg-surface text-ink-3 rounded-full px-[7px] py-px text-[10px] font-medium tracking-normal normal-case">
-          Soon
-        </span>
       </div>
-      <div
-        aria-disabled="true"
-        title="Settlements are not available yet"
-        className="border-line bg-panel grid grid-cols-4 overflow-hidden rounded-xl border opacity-60"
-      >
-        {SETTLEMENT_STATES.map((state) => (
+      <div className="border-line bg-panel grid grid-cols-4 overflow-hidden rounded-xl border">
+        {LIVE_STATES.map((status) => {
+          const list = settlements.filter((settlement) => settlement.status === status);
+          // Gross die haeufigste Waehrung, die uebrigen klein darunter: zwei
+          // Betraege nebeneinander passen nicht in eine Viertelkachel.
+          const [first, ...rest] = addTotals(list.flatMap((settlement) => settlement.totals));
+          return (
+            <Link
+              key={status}
+              href="/settlements"
+              className="border-line hover:bg-surface flex flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] first:border-l-0"
+            >
+              <span className="text-ink-2 flex items-center gap-[6px] text-[12.5px]">
+                <span className={`h-[6px] w-[6px] rounded-full ${STATUS_STYLE[status].dot}`} />
+                {STATUS_STYLE[status].label}
+              </span>
+              <span className="tabular truncate text-[18px] font-semibold tracking-[-0.02em]">
+                {first ? formatTotals([first]) : "0.00"}
+              </span>
+              <span className="text-ink-3 text-[11.5px]">
+                {list.length === 1 ? "1 settlement" : `${list.length} settlements`}
+              </span>
+              {rest.length > 0 ? (
+                <span className="tabular text-ink-2 -mt-1 truncate text-[11.5px]">
+                  + {formatTotals(rest)}
+                </span>
+              ) : null}
+            </Link>
+          );
+        })}
+        {PENDING_STATES.map((state) => (
           <div
             key={state}
-            className="border-line flex flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] first:border-l-0"
+            aria-disabled="true"
+            title="Needs a review by Finance - not available yet"
+            className="border-line flex flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] opacity-60"
           >
             <span className="text-ink-2 flex items-center gap-[6px] text-[12.5px]">
               <span className="bg-line-2 h-[6px] w-[6px] rounded-full" />
@@ -209,12 +234,13 @@ type HomeData = {
   failure?: LoadFailure;
   summary: CurrencySummary[];
   receipts: ApiReceipt[];
+  settlements: ApiSettlement[];
 };
 
 /**
- * Kennzahl und letzte Belege in einem Gang.
+ * Kennzahl, letzte Belege und Abrechnungen in einem Gang.
  *
- * Parallel, nicht nacheinander: die beiden Abfragen haengen nicht voneinander
+ * Parallel, nicht nacheinander: die Abfragen haengen nicht voneinander
  * ab, und hintereinander waere die Startseite doppelt so langsam wie noetig.
  */
 async function load(): Promise<HomeData> {
@@ -225,12 +251,13 @@ async function load(): Promise<HomeData> {
   };
 
   try {
-    const [summary, page] = await Promise.all([
-      fetchSummary(),
+    const [summary, page, settlements] = await Promise.all([
+      fetchSummary({ unassigned: true }),
       fetchReceiptPage({ ...query, from: null }),
+      fetchSettlements(),
     ]);
-    return { summary, receipts: page.receipts.slice(0, 5) };
+    return { summary, receipts: page.receipts.slice(0, 5), settlements };
   } catch (error) {
-    return { failure: classifyFailure(error), summary: [], receipts: [] };
+    return { failure: classifyFailure(error), summary: [], receipts: [], settlements: [] };
   }
 }

@@ -12,6 +12,7 @@
 
 import { apiRequest } from "./client";
 import type { ReceiptQuery } from "../receipts/query-params";
+import type { SettlementStatus } from "./settlements";
 
 export type ApiReceipt = {
   id: string;
@@ -37,8 +38,17 @@ export type ApiReceipt = {
   lineItemCount: number;
   /** "local:uploads/<uploadId>". Das Bild selbst liegt beim Agenten. */
   fileReference: string;
+  /** Die Abrechnung, in der der Beleg liegt. null = unassigned. */
+  settlement: ReceiptSettlement | null;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Die Abrechnung aus Sicht eines Belegs: genug fuer "in <Titel>" und gesperrt oder nicht. */
+export type ReceiptSettlement = {
+  id: string;
+  title: string | null;
+  status: SettlementStatus;
 };
 
 export type ReceiptPage = {
@@ -57,6 +67,7 @@ export async function fetchReceiptPage(query: ReceiptQuery): Promise<ReceiptPage
       from: query.from,
       to: query.to,
       category: query.category,
+      unassigned: query.unassigned ? "true" : undefined,
       sort: query.sort,
       dir: query.dir,
       limit: query.pageSize,
@@ -78,10 +89,18 @@ export type CurrencySummary = {
  * Die Kennzahl. Nimmt dieselben Filter wie die Liste, damit "unassigned" und
  * die Tabelle nie zwei verschiedene Wahrheiten zeigen.
  */
-export async function fetchSummary(query?: ReceiptQuery): Promise<CurrencySummary[]> {
+export async function fetchSummary(
+  query?: Partial<Pick<ReceiptQuery, "q" | "from" | "to" | "category" | "unassigned">>,
+): Promise<CurrencySummary[]> {
   const payload = await apiRequest<{ byCurrency: CurrencySummary[] }>("/receipts/summary", {
     query: query
-      ? { q: query.q, from: query.from, to: query.to, category: query.category }
+      ? {
+          q: query.q,
+          from: query.from,
+          to: query.to,
+          category: query.category,
+          unassigned: query.unassigned ? "true" : undefined,
+        }
       : undefined,
   });
   return payload.byCurrency;

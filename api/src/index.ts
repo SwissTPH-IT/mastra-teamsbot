@@ -1,6 +1,6 @@
 // Der Fachdaten-Dienst.
 //
-// Eigentuemer von app.* – Belege heute, Abrechnungen als naechstes. Der
+// Eigentuemer von app.* – Belege und Abrechnungen. Der
 // Mastra-Agent und (spaeter) die Weboberflaeche sprechen nur noch hierueber
 // mit der Datenbank; das Schema "mastra" bleibt dagegen beim Agenten, weil
 // PostgresStore dafuer eine eigene Verbindung braucht.
@@ -16,9 +16,12 @@ import { logger as requestLogger } from 'hono/logger';
 import { sql } from 'drizzle-orm';
 import { db } from 'mastra-teamsbot/db';
 import { closePool } from 'mastra-teamsbot/db/pool';
+import { ReceiptLockedError } from 'mastra-teamsbot/db/receipts';
+import { SettlementError } from 'mastra-teamsbot/db/settlements';
 import { authenticate, type AuthState } from './auth';
 import { identityRoutes } from './routes/identity';
 import { receiptRoutes } from './routes/receipts';
+import { settlementRoutes } from './routes/settlements';
 
 type Env = { Variables: { auth: AuthState } };
 
@@ -54,9 +57,12 @@ const audit: MiddlewareHandler<Env> = async (c, next) => {
 app.use('/receipts/*', authenticate, audit);
 app.use('/identity', authenticate, audit);
 app.use('/identity/*', authenticate, audit);
+app.use('/settlements', authenticate, audit);
+app.use('/settlements/*', authenticate, audit);
 
 app.route('/receipts', receiptRoutes);
 app.route('/identity', identityRoutes);
+app.route('/settlements', settlementRoutes);
 
 /**
  * /healthz, nicht /health – gleiche Namenswahl wie beim Agenten, damit beide
@@ -83,9 +89,34 @@ app.get('/healthz', async c => {
  * geloggt, aber nicht nach draussen gegeben – ein Stacktrace ist keine
  * Fehlermeldung.
  */
+const SETTLEMENT_ERROR_STATUS = {
+  'not-found': 404,
+  // Gesperrt und "diese Belege gehen nicht" sind Konflikte mit dem Zustand,
+  // keine kaputten Anfragen: dieselbe Anfrage waere gestern gegangen.
+  locked: 409,
+  'receipts-unavailable': 409,
+  // Formal gueltig, fachlich nicht einreichbar.
+  empty: 422,
+  incomplete: 422,
+} as const;
+
 app.onError((error, c) => {
   if (error instanceof HTTPException) {
     return c.json({ error: error.message }, error.status);
+  }
+  // Fachliche Fehler aus dem Repository. Sie tragen ihre Meldung selbst, weil
+  // nur das Repository weiss, WARUM ein Statement 0 Zeilen traf. `code` ist
+  // additiv und fuer Aufrufer, die selbst formulieren (die englische
+  // Oberflaeche): einen deutschen Satz auszuwerten waere eine Kopplung an
+  // seinen Wortlaut.
+  if (error instanceof SettlementError) {
+    return c.json(
+      { error: error.message, code: error.reason },
+      SETTLEMENT_ERROR_STATUS[error.reason],
+    );
+  }
+  if (error instanceof ReceiptLockedError) {
+    return c.json({ error: error.message, code: 'locked' }, 409);
   }
   console.error('[api] Unerwarteter Fehler:', error);
   return c.json({ error: 'Interner Fehler.' }, 500);

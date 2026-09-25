@@ -7,6 +7,7 @@
 // auseinanderliefen.
 
 import Link from "next/link";
+import { SelectAll, SelectBox } from "@/components/settlements/selection";
 import type { ApiReceipt } from "@/lib/api/receipts";
 import { categoryLabel } from "@/lib/receipts/categories";
 import { formatAmount, formatReceiptDate } from "@/lib/receipts/format";
@@ -76,34 +77,71 @@ export function RecentRow({ receipt }: { receipt: ApiReceipt }) {
   );
 }
 
-/**
- * Eine Zeile der Belegliste.
- *
- * Die Zuordnungsspalte steht in der Vorlage und bleibt hier stehen, zeigt aber
- * nur "not assigned": es gibt noch keine Abrechnungen, denen ein Beleg
- * zugeordnet sein koennte. Die Spalte zu entfernen und spaeter wieder
- * einzusetzen wuerde die Spaltenbreiten zweimal verschieben.
- */
-export function ReceiptRow({ receipt }: { receipt: ApiReceipt }) {
+/** Gesperrt heisst: in einer eingereichten Abrechnung. Dann weder auswaehlen noch verschieben. */
+export function lockedReason(receipt: ApiReceipt): string | undefined {
+  return receipt.settlement?.status === "submitted"
+    ? "Locked: in a submitted settlement"
+    : undefined;
+}
+
+/** "in Field visit Bern" oder "free" - wie die Spalte in der Vorlage. */
+function Assignment({ receipt }: { receipt: ApiReceipt }) {
+  if (!receipt.settlement) {
+    return <span className="text-brand-deep truncate text-[12.5px]">free</span>;
+  }
   return (
-    <Link
-      href={`/receipts/${receipt.id}`}
-      className="border-line bg-panel hover:bg-surface grid h-[50px] w-full grid-cols-[92px_minmax(0,1fr)_146px_110px_118px_186px] items-center gap-[14px] border-b px-[18px] text-left"
-    >
-      <span className="text-ink-3 tabular text-[13px]">
-        {formatReceiptDate(receipt.receiptDate) ?? "–"}
-      </span>
-      <Title receipt={receipt} />
-      <Category receipt={receipt} />
-      <span className="tabular text-right text-sm">{formatAmount(receipt.totalAmount) ?? "–"}</span>
-      <Source receipt={receipt} />
-      <span className="text-ink-3 truncate text-[12.5px]">not assigned</span>
-    </Link>
+    <span className="text-ink-2 truncate text-[12.5px]" title={receipt.settlement.title ?? ""}>
+      in {receipt.settlement.title}
+    </span>
   );
 }
 
-/** Der Kopf der Belegliste. Spaltenbreiten identisch zu ReceiptRow. */
-export function ReceiptTableHeader() {
+const ROW_GRID = "grid-cols-[92px_minmax(0,1fr)_146px_110px_118px_186px]";
+
+/**
+ * Eine Zeile der Belegliste.
+ *
+ * Die Checkbox steht AUSSERHALB des Links: ein Klick auf sie soll auswaehlen
+ * und nicht in die Detailansicht springen, und ein <input> in einem <a> ist
+ * ohnehin kein gueltiges HTML.
+ */
+export function ReceiptRow({ receipt }: { receipt: ApiReceipt }) {
+  return (
+    <div className="border-line bg-panel hover:bg-surface grid grid-cols-[18px_minmax(0,1fr)] items-center gap-[14px] border-b pl-[18px]">
+      <SelectBox
+        id={receipt.id}
+        amount={receipt.totalAmount}
+        currency={receipt.currency}
+        label={receiptTitle(receipt).text}
+        disabledReason={lockedReason(receipt)}
+      />
+      <Link
+        href={`/receipts/${receipt.id}`}
+        className={`grid h-[50px] w-full ${ROW_GRID} items-center gap-[14px] pr-[18px] text-left`}
+      >
+        <span className="text-ink-3 tabular text-[13px]">
+          {formatReceiptDate(receipt.receiptDate) ?? "–"}
+        </span>
+        <Title receipt={receipt} />
+        <Category receipt={receipt} />
+        <span className="tabular text-right text-sm">
+          {formatAmount(receipt.totalAmount) ?? "–"}
+        </span>
+        <Source receipt={receipt} />
+        <Assignment receipt={receipt} />
+      </Link>
+    </div>
+  );
+}
+
+/**
+ * Der Kopf der Belegliste. Spaltenbreiten identisch zu ReceiptRow.
+ *
+ * `receipts` fuer "alle auswaehlen": nur die Zeilen dieser Seite und nur die
+ * nicht gesperrten. Ohne (im Ladezustand) steht eine deaktivierte Box da,
+ * damit die Spalten nicht springen.
+ */
+export function ReceiptTableHeader({ receipts }: { receipts?: ApiReceipt[] }) {
   const columns = [
     { label: "Date", align: "" },
     { label: "Merchant / label", align: "" },
@@ -113,16 +151,31 @@ export function ReceiptTableHeader() {
     { label: "Assignment", align: "" },
   ];
 
+  const selectable = (receipts ?? [])
+    .filter((receipt) => !lockedReason(receipt))
+    .map((receipt) => ({
+      id: receipt.id,
+      amount: receipt.totalAmount,
+      currency: receipt.currency,
+    }));
+
   return (
-    <div className="border-line grid h-10 grid-cols-[92px_minmax(0,1fr)_146px_110px_118px_186px] items-center gap-[14px] border-b px-[18px]">
-      {columns.map((column) => (
-        <span
-          key={column.label}
-          className={`text-ink-3 text-[10.5px] font-semibold tracking-[0.08em] uppercase ${column.align}`}
-        >
-          {column.label}
-        </span>
-      ))}
+    <div className="border-line grid h-10 grid-cols-[18px_minmax(0,1fr)] items-center gap-[14px] border-b px-[18px]">
+      {receipts ? (
+        <SelectAll rows={selectable} />
+      ) : (
+        <input type="checkbox" disabled aria-hidden className="h-4 w-4" />
+      )}
+      <div className={`grid ${ROW_GRID} items-center gap-[14px]`}>
+        {columns.map((column) => (
+          <span
+            key={column.label}
+            className={`text-ink-3 text-[10.5px] font-semibold tracking-[0.08em] uppercase ${column.align}`}
+          >
+            {column.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

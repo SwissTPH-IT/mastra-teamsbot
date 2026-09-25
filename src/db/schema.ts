@@ -7,18 +7,76 @@
 
 import {
   char,
+  check,
   date,
+  foreignKey,
   index,
   jsonb,
   numeric,
   pgSchema,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const appSchema = pgSchema('app');
+
+/**
+ * Die Zustände einer Abrechnung, die es heute gibt.
+ *
+ * Die Vorlage kennt vier (Draft, Submitted, Approved, Query). Approved und
+ * Query setzen eine Prüfung durch Finance voraus, und diese Rolle gibt es im
+ * System nicht. Ein Status, den niemand setzen kann, wäre nur eine weitere
+ * Zeile im CHECK – er kommt dazu, wenn es jemanden gibt, der ihn setzt.
+ */
+export const SETTLEMENT_STATUSES = ['draft', 'submitted'] as const;
+export type SettlementStatus = (typeof SETTLEMENT_STATUSES)[number];
+
+/**
+ * Eine Abrechnung: ein Bündel Belege, das als Ganzes eingereicht wird.
+ *
+ * Bewusst schmal. Zeitraum, Anzahl und Summen stehen NICHT hier, sie werden
+ * aus den zugeordneten Belegen gerechnet – eine gespeicherte Summe wäre eine
+ * zweite Wahrheit, die bei jeder Zuordnung und jeder Korrektur mitgezogen
+ * werden müsste und irgendwann nicht mehr stimmt.
+ */
+export const settlements = appSchema.table(
+  'settlements',
+  {
+    id: text('id')
+      .primaryKey()
+      .default(sql`gen_random_uuid()::text`),
+
+    /** Dieselbe Teams-userId wie in receipts.user_id. */
+    userId: text('user_id').notNull(),
+
+    title: text('title').notNull(),
+    status: text('status').$type<SettlementStatus>().notNull().default('draft'),
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    // Ziel des zusammengesetzten Fremdschlüssels in receipts. `id` allein ist
+    // schon eindeutig, das Paar muss es für Postgres trotzdem ausdrücklich
+    // sein, sonst darf kein FK darauf zeigen.
+    unique('settlements_id_user_key').on(table.id, table.userId),
+    index('settlements_user_created_idx').on(table.userId, table.createdAt.desc()),
+    check(
+      'settlements_status_check',
+      sql`${table.status} in ('draft', 'submitted')`,
+    ),
+    // Eingereicht heisst: mit Zeitpunkt. Ohne diese Kopplung gibt es
+    // "submitted" ohne Datum, und die Oberfläche müsste raten.
+    check(
+      'settlements_submitted_at_check',
+      sql`(${table.status} = 'submitted') = (${table.submittedAt} is not null)`,
+    ),
+  ],
+);
 
 /**
  * Ein bestätigter Beleg.
@@ -83,6 +141,18 @@ export const receipts = appSchema.table(
     receiptType: text('receipt_type'),
     category: text('category'),
 
+    /**
+     * Die Abrechnung, in der der Beleg liegt. NULL heisst "unassigned".
+     *
+     * Ein Beleg liegt in höchstens einer Abrechnung, deshalb eine Spalte und
+     * keine Zwischentabelle. Der Fremdschlüssel unten läuft ueber
+     * (settlement_id, user_id) und nicht ueber settlement_id allein: nur so
+     * kann ein Beleg von A nicht in einer Abrechnung von B landen. Das ist
+     * damit eine Eigenschaft der Datenbank und keine Regel, die jede Query
+     * einhalten muss.
+     */
+    settlementId: text('settlement_id'),
+
     lineItems: jsonb('line_items').notNull().default(sql`'[]'::jsonb`),
     issues: jsonb('issues').notNull().default(sql`'[]'::jsonb`),
 
@@ -102,6 +172,16 @@ export const receipts = appSchema.table(
     uniqueIndex('receipts_user_file_hash_key').on(table.userId, table.fileHash),
     index('receipts_user_date_idx').on(table.userId, table.receiptDate.desc()),
     index('receipts_user_created_idx').on(table.userId, table.createdAt.desc()),
+    index('receipts_user_settlement_idx').on(table.userId, table.settlementId),
+    // Kein ON DELETE: eine Abrechnung mit Belegen lässt sich nicht löschen.
+    // SET NULL ginge hier nicht – es würde auch user_id auf NULL setzen
+    // wollen. deleteSettlement() hebt die Zuordnung deshalb vorher in
+    // derselben Transaktion auf.
+    foreignKey({
+      name: 'receipts_settlement_fk',
+      columns: [table.settlementId, table.userId],
+      foreignColumns: [settlements.id, settlements.userId],
+    }),
   ],
 );
 
@@ -165,6 +245,7 @@ export const pendingReviews = appSchema.table('pending_reviews', {
 });
 
 export type UserRow = typeof users.$inferSelect;
+export type SettlementRow = typeof settlements.$inferSelect;
 export type ReceiptRow = typeof receipts.$inferSelect;
 export type NewReceiptRow = typeof receipts.$inferInsert;
 export type PendingReviewRow = typeof pendingReviews.$inferSelect;

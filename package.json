@@ -10,6 +10,7 @@
   "exports": {
     "./db/schema": "./src/db/schema.ts",
     "./db/receipts": "./src/db/receipts.ts",
+    "./db/settlements": "./src/db/settlements.ts",
     "./db/users": "./src/db/users.ts",
     "./db/pool": "./src/db/pool.ts",
     "./db": "./src/db/index.ts",
