@@ -16,11 +16,13 @@ import { redirect } from "next/navigation";
 import { ApiError, isAuthError, isNotFound, isUnlinkedAccount } from "@/lib/api/client";
 import {
   assignReceipts,
+  changeSettlementCurrency,
   createSettlement,
   deleteSettlement,
   removeReceipt,
   submitSettlement,
 } from "@/lib/api/settlements";
+import { isSettlementCurrency } from "@/lib/settlements/currencies";
 
 export type ActionState = { ok: true; message?: string } | { ok: false; message: string } | null;
 
@@ -58,8 +60,24 @@ function explain(error: unknown, action: string): ActionState {
         return { ok: false, message: "An empty settlement cannot be submitted." };
       case "incomplete":
         return { ok: false, message: "Every item needs a receipt type before submitting." };
+      case "unconverted":
+        return {
+          ok: false,
+          message:
+            "Some items have no amount in the settlement currency yet: amount, currency, date or exchange rate is missing.",
+        };
+      case "rates-pending":
+        return {
+          ok: false,
+          message:
+            "Some exchange rates are not final yet. The daily rate is fixed one to two days after the receipt date.",
+        };
     }
-    if (error.status === 400) return { ok: false, message: "Please enter a title." };
+    if (error.status === 400) {
+      return error.fields?.includes("currency")
+        ? { ok: false, message: "Choose a currency." }
+        : { ok: false, message: "Please enter a title." };
+    }
   }
 
   console.error(`[frontend] ${action} fehlgeschlagen:`, error);
@@ -87,16 +105,20 @@ export async function assignToSettlement(
   const receiptIds = readReceiptIds(form);
   const target = String(form.get("target") ?? "");
   const title = String(form.get("title") ?? "").trim();
+  const currency = String(form.get("currency") ?? "");
 
   if (receiptIds.length === 0) return { ok: false, message: "No items selected." };
   if (!target) return { ok: false, message: "Choose a settlement." };
   if (target === NEW && !title) return { ok: false, message: "Please enter a title." };
+  if (target === NEW && !isSettlementCurrency(currency)) {
+    return { ok: false, message: "Choose a currency." };
+  }
 
   let settlementTitle: string;
   try {
     const settlement =
       target === NEW
-        ? await createSettlement(title, receiptIds)
+        ? await createSettlement(title, currency, receiptIds)
         : await assignReceipts(target, receiptIds);
     settlementTitle = settlement.title;
   } catch (error) {
@@ -114,17 +136,37 @@ export async function createEmptySettlement(
   form: FormData,
 ): Promise<ActionState> {
   const title = String(form.get("title") ?? "").trim();
+  const currency = String(form.get("currency") ?? "");
   if (!title) return { ok: false, message: "Please enter a title." };
+  if (!isSettlementCurrency(currency)) return { ok: false, message: "Choose a currency." };
 
   let id: string;
   try {
-    id = (await createSettlement(title)).id;
+    id = (await createSettlement(title, currency)).id;
   } catch (error) {
     return explain(error, "Anlegen");
   }
 
   refresh();
   redirect(`/settlements/${id}`);
+}
+
+/** Waehrung eines Entwurfs wechseln. Jede Position wird danach neu umgerechnet. */
+export async function changeCurrencyAction(
+  _previous: ActionState,
+  form: FormData,
+): Promise<ActionState> {
+  const currency = String(form.get("currency") ?? "");
+  if (!isSettlementCurrency(currency)) return { ok: false, message: "Choose a currency." };
+
+  try {
+    await changeSettlementCurrency(String(form.get("settlementId") ?? ""), currency);
+  } catch (error) {
+    return explain(error, "Waehrungswechsel");
+  }
+
+  refresh();
+  return { ok: true };
 }
 
 export async function removeFromSettlement(

@@ -87,15 +87,45 @@ services:
       # dann mit 401 abgewiesen (und der Grund steht im Log).
       ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
       ENTRA_API_AUDIENCE: ${ENTRA_API_AUDIENCE:-}
+      # Wechselkurse fuer die Abrechnungswaehrung. Servicename statt localhost.
+      FRANKFURTER_URL: http://frankfurter:8080
     depends_on:
       postgres:
         condition: service_healthy
+      # Nur gestartet, nicht gesund: ohne Frankfurter laeuft der Dienst weiter,
+      # es fehlen dann nur die umgerechneten Betraege. Und Frankfurters eigener
+      # Healthcheck hat 5 Minuten Startfrist - darauf zu warten hielte den
+      # ganzen Stack auf.
+      frankfurter:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 15s
+    restart: unless-stopped
+
+  frankfurter:
+    # Wechselkurse (https://frankfurter.dev), selbst gehostet. Nur der
+    # API-Dienst spricht mit ihm; er cached jeden Kurs in app.exchange_rates.
+    #
+    # Beim ersten Start fuellt Frankfurter seine SQLite-Datenbank aus den
+    # Quellen der Zentralbanken nach. Bis das durch ist (Minuten, je nach
+    # Quelle laenger), antwortet er fuer manche Waehrungen mit 404 - die
+    # Abrechnung zeigt dann "Rate unavailable" und holt es spaeter nach.
+    image: lineofflight/frankfurter
+    container_name: frankfurter
+    init: true
+    ports:
+      # Nach aussen, damit `npm run dev --workspace api` auf dem Host ihn unter
+      # dem Default http://localhost:8080 findet.
+      - "8080:8080"
+    environment:
+      DATABASE_URL: sqlite:///app/data/frankfurter.sqlite3
+    volumes:
+      # Ohne Volume beginnt der Backfill bei jedem Neustart von vorn.
+      - ./data/frankfurter:/app/data
     restart: unless-stopped
 
   frontend:

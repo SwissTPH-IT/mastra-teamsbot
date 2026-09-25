@@ -16,11 +16,12 @@ import { useActionState, useEffect, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { assignToSettlement, type ActionState } from "@/app/(app)/settlements/actions";
 import type { ApiSettlement } from "@/lib/api/settlements";
-import { formatPeriod, formatTotals, itemCount } from "@/lib/settlements/format";
+import { formatPeriod, formatSettlementTotal, itemCount } from "@/lib/settlements/format";
+import { CurrencySelect } from "./currency-select";
 
 export type AssignTarget = Pick<
   ApiSettlement,
-  "id" | "title" | "periodStart" | "periodEnd" | "receiptCount" | "totals"
+  "id" | "title" | "periodStart" | "periodEnd" | "receiptCount" | "total"
 >;
 
 export function AssignDialog({
@@ -107,7 +108,7 @@ export function AssignDialog({
                     </span>
                   </span>
                   <span className="tabular text-sm font-medium">
-                    {formatTotals(settlement.totals)}
+                    {formatSettlementTotal(settlement.total)}
                   </span>
                 </label>
               );
@@ -140,6 +141,16 @@ export function AssignDialog({
                   className="border-line-2 bg-panel text-ink h-11 w-full rounded-[11px] border px-3 text-sm"
                 />
                 <span className="text-ink-3 text-[11.5px]">e.g. Field visit Bern, week 38</span>
+              </label>
+            ) : null}
+
+            {target === "new" ? (
+              <label className="flex flex-col gap-[7px]">
+                <span className="text-ink-2 text-[12.5px] font-medium">Settlement currency</span>
+                <CurrencySelect className="border-line-2 bg-panel text-ink h-11 w-full rounded-[11px] border px-3 text-sm" />
+                <span className="text-ink-3 text-[11.5px]">
+                  Every item is converted at the rate of its receipt date.
+                </span>
               </label>
             ) : null}
           </div>

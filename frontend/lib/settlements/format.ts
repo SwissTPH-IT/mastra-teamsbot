@@ -4,9 +4,19 @@
 // Zuordnungsdialog dieselbe Abrechnung zeigen. Laeuft das auseinander, heisst
 // sie auf einer Seite "Draft" und auf der naechsten "draft".
 
-import type { ApiSettlement, SettlementStatus } from "../api/settlements";
+import type {
+  ApiSettlement,
+  Conversion,
+  SettlementStatus,
+  SettlementTotal,
+} from "../api/settlements";
 import type { CurrencySummary } from "../api/receipts";
-import { formatAmount, formatReceiptDate, formatTimestamp } from "../receipts/format";
+import {
+  formatAmount,
+  formatAmountWithCurrency,
+  formatReceiptDate,
+  formatTimestamp,
+} from "../receipts/format";
 
 /** Aufschrift und Punktfarbe je Status. Farben wie STATUS_STYLE in der Vorlage. */
 export const STATUS_STYLE: Record<SettlementStatus, { label: string; dot: string }> = {
@@ -35,6 +45,53 @@ export function formatTotals(totals: CurrencySummary[]): string {
   return totals
     .map((entry) => `${formatAmount(entry.sum) ?? entry.sum} ${entry.currency ?? "(no currency)"}`)
     .join(" + ");
+}
+
+/**
+ * Die eine Summe einer Abrechnung, in ihrer Waehrung: "236.63 CHF".
+ *
+ * Fehlt eine Position darin, steht das dabei ("+ 1 item not converted") -
+ * eine nackte Zahl wuerde als vollstaendige Summe gelesen.
+ */
+export function formatSettlementTotal(total: SettlementTotal): string {
+  const sum = `${formatAmount(total.sum) ?? total.sum} ${total.currency}`;
+  if (total.missingCount === 0) return sum;
+  return `${sum} + ${itemCount(total.missingCount)} not converted`;
+}
+
+/**
+ * Die Umrechnung einer Position als Kurzzeile unter dem Betrag:
+ * "EUR 100.00 · 1 CHF = 1.0569 EUR". Leer bei gleicher Waehrung.
+ */
+export function conversionNote(
+  receipt: { totalAmount: string | null; currency: string | null },
+  conversion: Conversion,
+  settlementCurrency: string,
+): string | null {
+  if (!receipt.currency || receipt.currency === settlementCurrency) return null;
+  const original = formatAmountWithCurrency(receipt.totalAmount, receipt.currency);
+  if (!original) return null;
+  if (!conversion.rate) return original;
+  return `${original} · 1 ${settlementCurrency} = ${formatExchangeRate(conversion.rate)} ${receipt.currency}`;
+}
+
+/**
+ * Warum eine Position keinen Betrag in der Abrechnungswaehrung hat - kurz,
+ * fuer die Zeile. Wortlaut englisch wie die ganze Oberflaeche.
+ */
+export const MISSING_CONVERSION: Record<NonNullable<Conversion["missing"]>, string> = {
+  amount: "No amount",
+  currency: "No currency",
+  date: "No date, no rate",
+  rate: "Rate unavailable",
+};
+
+/**
+ * "1.05690000" -> "1.0569". Der Dienst liefert numeric(20,8), Frankfurter
+ * hat davon nur ~5 signifikante Stellen - die Nullen dahinter sind Rauschen.
+ */
+export function formatExchangeRate(rate: string): string {
+  return rate.includes(".") ? rate.replace(/0+$/, "").replace(/\.$/, "") : rate;
 }
 
 /**

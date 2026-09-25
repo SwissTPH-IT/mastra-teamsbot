@@ -14,6 +14,7 @@ import {
   jsonb,
   numeric,
   pgSchema,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -35,6 +36,17 @@ export const SETTLEMENT_STATUSES = ['draft', 'submitted'] as const;
 export type SettlementStatus = (typeof SETTLEMENT_STATUSES)[number];
 
 /**
+ * Die Währungen, auf die eine Abrechnung lauten kann – das, was ausgezahlt
+ * wird, nicht das, was auf Belegen steht. Belege dürfen jede Währung haben,
+ * die Frankfurter kennt.
+ *
+ * Die Liste ist Fachentscheidung, keine Technik: die Datenbank prüft nur das
+ * Format, der Dienst diese Liste. frontend/lib/settlements/currencies.ts
+ * spiegelt sie für die Auswahl – beide ändern.
+ */
+export const SETTLEMENT_CURRENCIES = ['CHF', 'EUR', 'USD', 'GBP'] as const;
+
+/**
  * Eine Abrechnung: ein Bündel Belege, das als Ganzes eingereicht wird.
  *
  * Bewusst schmal. Zeitraum, Anzahl und Summen stehen NICHT hier, sie werden
@@ -53,6 +65,17 @@ export const settlements = appSchema.table(
     userId: text('user_id').notNull(),
 
     title: text('title').notNull(),
+
+    /**
+     * ISO-4217, in der die Abrechnung eingereicht wird. Jede Position steht
+     * darin, umgerechnet zum Kurs ihres Belegdatums (siehe exchangeRates).
+     *
+     * Eine Abrechnung ist EIN Betrag in EINER Währung – das, was ausgezahlt
+     * wird. Der Default gilt nur für Zeilen von vor dieser Spalte; neue
+     * Abrechnungen bekommen die Währung ausdrücklich beim Anlegen.
+     */
+    currency: char('currency', { length: 3 }).notNull().default('CHF'),
+
     status: text('status').$type<SettlementStatus>().notNull().default('draft'),
     submittedAt: timestamp('submitted_at', { withTimezone: true }),
 
@@ -65,6 +88,7 @@ export const settlements = appSchema.table(
     // sein, sonst darf kein FK darauf zeigen.
     unique('settlements_id_user_key').on(table.id, table.userId),
     index('settlements_user_created_idx').on(table.userId, table.createdAt.desc()),
+    check('settlements_currency_check', sql`${table.currency} ~ '^[A-Z]{3}$'`),
     check(
       'settlements_status_check',
       sql`${table.status} in ('draft', 'submitted')`,
@@ -226,6 +250,41 @@ export const receipts = appSchema.table(
 );
 
 /**
+ * Wechselkurse von Frankfurter, als Cache – keine Fachdaten eines Nutzers.
+ *
+ * Deshalb ohne user_id: ein Kurs ist öffentlich und für alle derselbe. Die
+ * Tabelle hält fest, dass ein historischer Kurs sich nicht mehr ändert – sonst
+ * fragte jede Abrechnungsansicht Frankfurter, und eine eingereichte Abrechnung
+ * hinge an der Verfügbarkeit eines fremden Dienstes.
+ *
+ * Richtung: 1 `base` = `rate` `quote`, mit base = Abrechnungswährung und
+ * quote = Belegwährung ("1 CHF = 157.02 KES"). Umgerechnet wird durch
+ * Teilen. Andersherum käme bei schwachen Währungen zu wenig Genauigkeit an:
+ * Frankfurter rundet auf fünf Nachkommastellen, KES->CHF ist 0.00636.
+ *
+ * `onDate` ist der angefragte Tag (das Belegdatum), `rateDate` der Tag, von
+ * dem der Kurs tatsächlich stammt. Fallen sie auseinander oder wurde der Kurs
+ * am selben Tag geholt, ist er vorläufig und wird nachgeholt – siehe
+ * isProvisionalRate() in src/db/exchange-rates.ts.
+ */
+export const exchangeRates = appSchema.table(
+  'exchange_rates',
+  {
+    base: char('base', { length: 3 }).notNull(),
+    quote: char('quote', { length: 3 }).notNull(),
+    onDate: date('on_date').notNull(),
+    // Kein float: der Kurs geht in eine Division über Geldbeträge.
+    rate: numeric('rate', { precision: 20, scale: 8 }).notNull(),
+    rateDate: date('rate_date').notNull(),
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  table => [
+    primaryKey({ name: 'exchange_rates_pkey', columns: [table.base, table.quote, table.onDate] }),
+    check('exchange_rates_rate_positive', sql`${table.rate} > 0`),
+  ],
+);
+
+/**
  * Die Identität hinter einer Teams-userId.
  *
  * `teams_user_id` ist dieselbe ID wie `receipts.user_id` – sie kommt aus dem
@@ -286,6 +345,7 @@ export const pendingReviews = appSchema.table('pending_reviews', {
 
 export type UserRow = typeof users.$inferSelect;
 export type SettlementRow = typeof settlements.$inferSelect;
+export type ExchangeRateRow = typeof exchangeRates.$inferSelect;
 export type ReceiptRow = typeof receipts.$inferSelect;
 export type NewReceiptRow = typeof receipts.$inferInsert;
 export type PendingReviewRow = typeof pendingReviews.$inferSelect;

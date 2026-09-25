@@ -29,7 +29,10 @@ npm run typecheck --workspace api
 
 Needs `DATABASE_URL` and `API_SERVICE_TOKEN` (min. 32 chars — it throws on start
 without it). `ENTRA_TENANT_ID` / `ENTRA_API_AUDIENCE` are optional; without them
-only the service-token path works and user tokens get a 401.
+only the service-token path works and user tokens get a 401. `FRANKFURTER_URL`
+(default `http://localhost:8080`, `docker compose up frankfurter -d`) supplies
+exchange rates; without it settlements still load, foreign-currency items just
+show "Rate unavailable" and cannot be submitted.
 
 Frontend (`frontend/` — an **npm workspace of the repo root**, not a separate
 project; `npm install` runs at the root):
@@ -93,7 +96,8 @@ Four invariants to preserve:
    migrations — every byte of receipt data comes from `api/`, and every write goes
    through `api/` too: `PATCH /receipts/:id` for corrections (category, receipt type
    and the fact fields), `POST /receipts/manual` for an expense without receipt, and
-   the `/settlements` endpoints (create, assign, remove, submit, delete draft).
+   the `/settlements` endpoints (create with currency, change currency, assign,
+   remove, submit, delete draft).
 
 Key pieces (`src/mastra/`):
 
@@ -171,7 +175,7 @@ with two states, `draft` and `submitted`; the mockup's Approved/Query need a Fin
 review role that does not exist, so those tiles are visibly greyed out rather than
 hidden — `frontend/README.md` lists every greyed element and every deviation from the
 mockup. Settlement errors carry a machine `code` (`locked`, `receipts-unavailable`,
-`empty`, `incomplete`) next to the German `error`; the frontend words its English
+`empty`, `incomplete`, `unconverted`, `rates-pending`) next to the German `error`; the frontend words its English
 message from the code, never from the German text.
 
 ### Routing and API gotchas
@@ -202,6 +206,26 @@ Settlements add a second layer that does not depend on query code: the foreign k
 settlement of B. Keep it composite; a plain FK on `settlement_id` would silently allow
 exactly that. It has no `ON DELETE` (`SET NULL` would also null `user_id`) —
 `deleteSettlement()` unassigns in the same transaction first.
+
+### Settlement currency and exchange rates
+
+A settlement has one `currency` (`SETTLEMENT_CURRENCIES` in `src/db/schema.ts`,
+mirrored in `frontend/lib/settlements/currencies.ts` — change both). Every item is
+converted at the rate of **its** `receipt_date`, fetched from the self-hosted
+Frankfurter service (`lineofflight/frankfurter`) by `api/src/fx.ts` only — the
+repository never does HTTP. Rates are cached in `app.exchange_rates` (public data,
+no `user_id`) as "1 settlement currency = rate receipt currency" and converted by
+**division** in Postgres (`convertedAmount()` in `src/db/exchange-rates.ts`):
+Frankfurter rounds to 5 decimals, so the other direction loses precision for weak
+currencies. Converted amounts are computed on read, never stored.
+
+A rate is provisional while `rate_date < on_date` or it was fetched less than two
+days after `on_date`; provisional rows are refreshed (at most hourly), final rows
+are never overwritten (`saveRates()` `setWhere`). `submitSettlement()` refuses
+`unconverted` and `rates-pending` — together that is what keeps a submitted total
+fixed. Write functions in `src/db/settlements.ts` return ids/void, not a detail:
+the route calls `ensureRates()` first and reads afterwards (`loadDetail()`).
+`ensureRates()` never throws; a Frankfurter outage degrades to missing amounts.
 
 ### Constraints that live in more than one file
 

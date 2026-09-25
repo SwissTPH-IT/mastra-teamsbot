@@ -12,12 +12,16 @@
 // damit ein gleichzeitiges Einreichen nicht zwischen Prüfen und Schreiben
 // fallen kann.
 
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { db } from './index';
-import { receipts, settlements, type SettlementRow } from './schema';
+import { exchangeRates, receipts, settlements, type SettlementRow } from './schema';
 import { receiptIsEditable, type ReceiptWithSettlement } from './receipts';
+import { conversionIsProvisional, convertedAmount, rateJoin } from './exchange-rates';
 
-/** Eine Summe je Währung. CHF und EUR zu addieren ergäbe keine Zahl. */
+/**
+ * Eine Summe je Originalwährung. CHF und EUR zu addieren ergäbe keine Zahl –
+ * dafür gibt es `total`, umgerechnet.
+ */
 export type CurrencyTotal = {
   /** null bei Belegen, auf denen keine Währung zu lesen war. */
   currency: string | null;
@@ -28,23 +32,63 @@ export type CurrencyTotal = {
 
 export type CategoryTotal = CurrencyTotal & { category: string | null };
 
+/**
+ * Die Summe der Abrechnung in IHRER Währung: jede Position zum Kurs ihres
+ * Belegdatums umgerechnet, dann addiert.
+ *
+ * `missingCount` Positionen fehlen darin (kein Betrag, keine Währung, kein
+ * Datum oder noch kein Kurs). Solange das nicht 0 ist, ist `sum` zu klein,
+ * und die Oberfläche muss das sagen, statt eine falsche Zahl zu zeigen.
+ */
+export type SettlementTotal = {
+  currency: string;
+  sum: string;
+  missingCount: number;
+  /** Positionen, deren Kurs sich noch ändern kann – siehe isProvisionalRate(). */
+  provisionalCount: number;
+};
+
 export type SettlementSummary = SettlementRow & {
   receiptCount: number;
   /** Frühestes und spätestes Belegdatum. Der Zeitraum wird nicht gespeichert. */
   periodStart: string | null;
   periodEnd: string | null;
+  /** Je Originalwährung, unumgerechnet. */
   totals: CurrencyTotal[];
+  total: SettlementTotal;
 };
+
+/** Die Umrechnung einer Position in die Abrechnungswährung. */
+export type Conversion = {
+  /** Betrag in der Abrechnungswährung. null: nicht rechenbar, siehe `missing`. */
+  amount: string | null;
+  /** 1 Abrechnungswährung = `rate` Belegwährung. null bei gleicher Währung oder ohne Kurs. */
+  rate: string | null;
+  /** Von welchem Tag der Kurs stammt. Kann vor dem Belegdatum liegen. */
+  rateDate: string | null;
+  provisional: boolean;
+  missing: 'amount' | 'currency' | 'date' | 'rate' | null;
+};
+
+export type SettlementItem = ReceiptWithSettlement & { conversion: Conversion };
 
 export type SettlementDetail = SettlementSummary & {
+  /** Je Kategorie, in der Abrechnungswährung. */
   byCategory: CategoryTotal[];
-  receipts: ReceiptWithSettlement[];
+  receipts: SettlementItem[];
 };
 
-/** Warum eine Änderung an einer Abrechnung nicht ging. Die API macht daraus 404/409. */
+/** Warum eine Änderung an einer Abrechnung nicht ging. Die API macht daraus 404/409/422. */
 export class SettlementError extends Error {
   constructor(
-    readonly reason: 'not-found' | 'locked' | 'empty' | 'incomplete' | 'receipts-unavailable',
+    readonly reason:
+      | 'not-found'
+      | 'locked'
+      | 'empty'
+      | 'incomplete'
+      | 'unconverted'
+      | 'rates-pending'
+      | 'receipts-unavailable',
     message: string,
   ) {
     super(message);
@@ -63,41 +107,87 @@ const locked = () =>
 export const MAX_ASSIGN = 200;
 
 /**
+ * Die Belege der Abrechnung(en) mit ihrem Kurs. Die Abrechnung hängt über
+ * (id, user_id) daran, wie beim Fremdschlüssel – sie liefert die Zielwährung.
+ */
+function settlementJoin(): SQL | undefined {
+  return and(eq(settlements.id, receipts.settlementId), eq(settlements.userId, receipts.userId));
+}
+
+type Aggregate = Omit<SettlementSummary, keyof SettlementRow>;
+
+function emptyAggregate(currency: string): Aggregate {
+  return {
+    receiptCount: 0,
+    periodStart: null,
+    periodEnd: null,
+    totals: [],
+    total: { currency, sum: '0.00', missingCount: 0, provisionalCount: 0 },
+  };
+}
+
+/**
  * Anzahl, Zeitraum und Summen je Abrechnung, für mehrere auf einmal.
  *
- * Eine Abfrage für alle statt einer pro Abrechnung. Gruppiert nach
- * (Abrechnung, Währung); die Zusammenfassung pro Abrechnung passiert danach in
- * JavaScript, aber nur als Einsammeln – gerechnet wird in Postgres.
+ * Zwei Abfragen für alle statt je eine pro Abrechnung: eine gruppiert nach
+ * (Abrechnung, Originalwährung), eine nach Abrechnung für die umgerechnete
+ * Summe. Die Zusammenfassung passiert danach in JavaScript, aber nur als
+ * Einsammeln – gerechnet wird in Postgres.
  */
 async function aggregate(
   userId: string,
-  settlementIds: string[],
-): Promise<Map<string, Omit<SettlementSummary, keyof SettlementRow>>> {
-  const result = new Map<string, Omit<SettlementSummary, keyof SettlementRow>>();
-  if (settlementIds.length === 0) return result;
+  settlementRows: SettlementRow[],
+): Promise<Map<string, Aggregate>> {
+  const result = new Map<string, Aggregate>();
+  if (settlementRows.length === 0) return result;
+  const settlementIds = settlementRows.map(row => row.id);
 
-  const rows = await db
-    .select({
-      settlementId: receipts.settlementId,
-      currency: receipts.currency,
-      count: sql<number>`count(*)::int`,
-      sum: sql<string>`coalesce(sum(${receipts.totalAmount}), 0)::text`,
-      periodStart: sql<string | null>`min(${receipts.receiptDate})::text`,
-      periodEnd: sql<string | null>`max(${receipts.receiptDate})::text`,
-    })
-    .from(receipts)
-    .where(and(eq(receipts.userId, userId), inArray(receipts.settlementId, settlementIds)))
-    .groupBy(receipts.settlementId, receipts.currency)
-    .orderBy(sql`count(*) desc`);
+  const [rows, converted] = await Promise.all([
+    db
+      .select({
+        settlementId: receipts.settlementId,
+        currency: receipts.currency,
+        count: sql<number>`count(*)::int`,
+        sum: sql<string>`coalesce(sum(${receipts.totalAmount}), 0)::text`,
+        periodStart: sql<string | null>`min(${receipts.receiptDate})::text`,
+        periodEnd: sql<string | null>`max(${receipts.receiptDate})::text`,
+      })
+      .from(receipts)
+      .where(and(eq(receipts.userId, userId), inArray(receipts.settlementId, settlementIds)))
+      .groupBy(receipts.settlementId, receipts.currency)
+      .orderBy(sql`count(*) desc`),
+    db
+      .select({
+        settlementId: receipts.settlementId,
+        sum: sql<string>`coalesce(sum(${convertedAmount()}), 0)::text`,
+        missingCount: sql<number>`count(*) filter (where ${convertedAmount()} is null)::int`,
+        provisionalCount: sql<number>`count(*) filter (where ${conversionIsProvisional()})::int`,
+      })
+      .from(receipts)
+      .innerJoin(settlements, settlementJoin())
+      .leftJoin(exchangeRates, rateJoin())
+      .where(and(eq(receipts.userId, userId), inArray(receipts.settlementId, settlementIds)))
+      .groupBy(receipts.settlementId),
+  ]);
+
+  for (const settlement of settlementRows) {
+    result.set(settlement.id, emptyAggregate(settlement.currency.trim()));
+  }
+
+  for (const row of converted) {
+    const entry = row.settlementId ? result.get(row.settlementId) : undefined;
+    if (!entry) continue;
+    entry.total = {
+      ...entry.total,
+      sum: row.sum,
+      missingCount: row.missingCount,
+      provisionalCount: row.provisionalCount,
+    };
+  }
 
   for (const row of rows) {
-    if (!row.settlementId) continue;
-    const entry = result.get(row.settlementId) ?? {
-      receiptCount: 0,
-      periodStart: null,
-      periodEnd: null,
-      totals: [],
-    };
+    const entry = row.settlementId ? result.get(row.settlementId) : undefined;
+    if (!entry) continue;
     entry.receiptCount += row.count;
     // YYYY-MM-DD vergleicht sich als String korrekt.
     if (row.periodStart && (!entry.periodStart || row.periodStart < entry.periodStart)) {
@@ -107,25 +197,14 @@ async function aggregate(
       entry.periodEnd = row.periodEnd;
     }
     entry.totals.push({ currency: row.currency?.trim() ?? null, count: row.count, sum: row.sum });
-    result.set(row.settlementId, entry);
   }
 
   return result;
 }
 
-function withAggregate(
-  row: SettlementRow,
-  aggregates: Map<string, Omit<SettlementSummary, keyof SettlementRow>>,
-): SettlementSummary {
-  return {
-    ...row,
-    ...(aggregates.get(row.id) ?? {
-      receiptCount: 0,
-      periodStart: null,
-      periodEnd: null,
-      totals: [],
-    }),
-  };
+function withAggregate(row: SettlementRow, aggregates: Map<string, Aggregate>): SettlementSummary {
+  const currency = row.currency.trim();
+  return { ...row, currency, ...(aggregates.get(row.id) ?? emptyAggregate(currency)) };
 }
 
 /** Die Abrechnungen des Nutzers: Entwürfe zuerst, dann die neuesten. */
@@ -148,10 +227,7 @@ export async function listSettlements(
       desc(settlements.id),
     );
 
-  const aggregates = await aggregate(
-    userId,
-    rows.map(row => row.id),
-  );
+  const aggregates = await aggregate(userId, rows);
   return rows.map(row => withAggregate(row, aggregates));
 }
 
@@ -164,6 +240,20 @@ async function getSettlementRow(userId: string, settlementId: string): Promise<S
   return row ?? null;
 }
 
+/** Warum eine Position keinen Betrag in der Abrechnungswährung hat. */
+function missingReason(
+  item: { totalAmount: string | null; currency: string | null; receiptDate: string | null },
+  settlementCurrency: string,
+  amount: string | null,
+): Conversion['missing'] {
+  if (amount !== null) return null;
+  if (item.totalAmount === null) return 'amount';
+  if (item.currency === null) return 'currency';
+  if (item.currency.trim() === settlementCurrency) return null;
+  if (item.receiptDate === null) return 'date';
+  return 'rate';
+}
+
 /** Eine Abrechnung mit Belegen und Summen je Kategorie. null, wenn sie dem Nutzer nicht gehört. */
 export async function getSettlement(
   userId: string,
@@ -171,24 +261,37 @@ export async function getSettlement(
 ): Promise<SettlementDetail | null> {
   const row = await getSettlementRow(userId, settlementId);
   if (!row) return null;
+  const currency = row.currency.trim();
+  const inThisSettlement = and(eq(receipts.userId, userId), eq(receipts.settlementId, row.id));
 
   const [aggregates, byCategory, items] = await Promise.all([
-    aggregate(userId, [row.id]),
+    aggregate(userId, [row]),
+    // Je Kategorie in der Abrechnungswährung, nicht mehr je Originalwährung:
+    // eine Abrechnung hat genau eine Summe pro Kategorie.
     db
       .select({
         category: receipts.category,
-        currency: receipts.currency,
         count: sql<number>`count(*)::int`,
-        sum: sql<string>`coalesce(sum(${receipts.totalAmount}), 0)::text`,
+        sum: sql<string>`coalesce(sum(${convertedAmount()}), 0)::text`,
       })
       .from(receipts)
-      .where(and(eq(receipts.userId, userId), eq(receipts.settlementId, row.id)))
-      .groupBy(receipts.category, receipts.currency)
-      .orderBy(sql`coalesce(sum(${receipts.totalAmount}), 0) desc`),
+      .innerJoin(settlements, settlementJoin())
+      .leftJoin(exchangeRates, rateJoin())
+      .where(inThisSettlement)
+      .groupBy(receipts.category)
+      .orderBy(sql`coalesce(sum(${convertedAmount()}), 0) desc`),
     db
-      .select()
+      .select({
+        receipt: receipts,
+        amount: convertedAmount(),
+        rate: exchangeRates.rate,
+        rateDate: sql<string | null>`${exchangeRates.rateDate}::text`,
+        provisional: conversionIsProvisional(),
+      })
       .from(receipts)
-      .where(and(eq(receipts.userId, userId), eq(receipts.settlementId, row.id)))
+      .innerJoin(settlements, settlementJoin())
+      .leftJoin(exchangeRates, rateJoin())
+      .where(inThisSettlement)
       .orderBy(
         sql`${receipts.receiptDate} asc nulls last`,
         asc(receipts.createdAt),
@@ -198,11 +301,19 @@ export async function getSettlement(
 
   return {
     ...withAggregate(row, aggregates),
-    byCategory: byCategory.map(entry => ({ ...entry, currency: entry.currency?.trim() ?? null })),
+    byCategory: byCategory.map(entry => ({ ...entry, currency })),
     receipts: items.map(item => ({
-      ...item,
+      ...item.receipt,
       settlementTitle: row.title,
       settlementStatus: row.status,
+      conversion: {
+        // Postgres liefert das numeric als String; round() ist schon passiert.
+        amount: item.amount,
+        rate: item.rate,
+        rateDate: item.rateDate,
+        provisional: item.provisional,
+        missing: missingReason(item.receipt, currency, item.amount),
+      },
     })),
   };
 }
@@ -245,33 +356,38 @@ async function moveReceipts(
  *
  * Beides in einer Transaktion: "Create new settlement" im Zuordnungsdialog
  * soll nicht eine leere Abrechnung zurücklassen, wenn die Zuordnung scheitert.
+ *
+ * Wie alle schreibenden Funktionen hier liefert sie nur die id und keine
+ * Detailansicht: die rechnet mit Kursen, die der Dienst erst NACH dem
+ * Schreiben holen kann – neue Belege brauchen neue Kurse.
  */
 export async function createSettlement(
   userId: string,
-  title: string,
+  input: { title: string; currency: string },
   receiptIds: string[] = [],
-): Promise<SettlementDetail> {
-  const id = await db.transaction(async tx => {
+): Promise<string> {
+  return db.transaction(async tx => {
     const [row] = await tx
       .insert(settlements)
-      .values({ userId, title })
+      .values({ userId, title: input.title, currency: input.currency })
       .returning({ id: settlements.id });
     await moveReceipts(tx, userId, row!.id, receiptIds);
     return row!.id;
   });
-
-  return (await getSettlement(userId, id))!;
 }
 
-/** Titel ändern. Nur im Entwurf – eine eingereichte Abrechnung heisst, wie sie eingereicht wurde. */
-export async function renameSettlement(
+/**
+ * Titel oder Währung ändern. Nur im Entwurf – eine eingereichte Abrechnung
+ * heisst, wie sie eingereicht wurde, und lautet auf die Währung von damals.
+ */
+export async function updateSettlement(
   userId: string,
   settlementId: string,
-  title: string,
+  changes: { title?: string; currency?: string },
 ): Promise<SettlementRow> {
   const [row] = await db
     .update(settlements)
-    .set({ title, updatedAt: sql`now()` })
+    .set({ ...changes, updatedAt: sql`now()` })
     .where(
       and(
         eq(settlements.id, settlementId),
@@ -326,7 +442,7 @@ export async function assignReceipts(
   userId: string,
   settlementId: string,
   receiptIds: string[],
-): Promise<SettlementDetail> {
+): Promise<void> {
   await db.transaction(async tx => {
     const [row] = await tx
       .select({ status: settlements.status })
@@ -339,8 +455,6 @@ export async function assignReceipts(
 
     await moveReceipts(tx, userId, settlementId, receiptIds);
   });
-
-  return (await getSettlement(userId, settlementId))!;
 }
 
 /**
@@ -354,7 +468,7 @@ export async function unassignReceipt(
   userId: string,
   settlementId: string,
   receiptId: string,
-): Promise<SettlementDetail> {
+): Promise<void> {
   const settlement = await getSettlementRow(userId, settlementId);
   if (!settlement) throw notFound();
 
@@ -375,23 +489,23 @@ export async function unassignReceipt(
     if (settlement.status !== 'draft') throw locked();
     throw new SettlementError('receipts-unavailable', 'Der Beleg liegt nicht in dieser Abrechnung.');
   }
-
-  return (await getSettlement(userId, settlementId))!;
 }
 
 /**
  * Einreichen. Danach ist die Abrechnung gesperrt.
  *
- * Zwei Bedingungen vorher, beide in der Transaktion unter FOR UPDATE:
- * nicht leer, und jeder Beleg hat eine Belegart ("Required before
- * submitting" steht in der Oberfläche am Feld). Zurück in den Entwurf gibt es
- * bewusst keinen Endpunkt – das ist die Aufgabe von Finance, und diese Rolle
- * gibt es noch nicht.
+ * Vier Bedingungen vorher, alle in der Transaktion unter FOR UPDATE:
+ * nicht leer, jeder Beleg hat eine Belegart ("Required before submitting"
+ * steht in der Oberfläche am Feld), jede Position hat einen Betrag in der
+ * Abrechnungswährung, und keiner der Kurse ist noch vorläufig. Das Letzte ist
+ * die Garantie, dass eine eingereichte Summe sich nie mehr bewegt: feste Kurse
+ * überschreibt saveRates() nicht.
+ *
+ * Die Kurse holt der Dienst vorher; hier wird nur gelesen. Zurück in den
+ * Entwurf gibt es bewusst keinen Endpunkt – das ist die Aufgabe von Finance,
+ * und diese Rolle gibt es noch nicht.
  */
-export async function submitSettlement(
-  userId: string,
-  settlementId: string,
-): Promise<SettlementDetail> {
+export async function submitSettlement(userId: string, settlementId: string): Promise<void> {
   await db.transaction(async tx => {
     const [row] = await tx
       .select({ status: settlements.status })
@@ -406,8 +520,12 @@ export async function submitSettlement(
       .select({
         total: sql<number>`count(*)::int`,
         withoutType: sql<number>`count(*) filter (where ${receipts.receiptType} is null)::int`,
+        unconverted: sql<number>`count(*) filter (where ${convertedAmount()} is null)::int`,
+        provisional: sql<number>`count(*) filter (where ${conversionIsProvisional()})::int`,
       })
       .from(receipts)
+      .innerJoin(settlements, settlementJoin())
+      .leftJoin(exchangeRates, rateJoin())
       .where(and(eq(receipts.userId, userId), eq(receipts.settlementId, settlementId)));
 
     if (!counts || counts.total === 0) {
@@ -419,12 +537,24 @@ export async function submitSettlement(
         `${counts.withoutType} Beleg(e) ohne Belegart. Die Belegart ist vor dem Einreichen Pflicht.`,
       );
     }
+    if (counts.unconverted > 0) {
+      throw new SettlementError(
+        'unconverted',
+        `${counts.unconverted} Position(en) ohne Betrag in der Abrechnungswährung: es fehlt ` +
+          'Betrag, Währung, Belegdatum oder ein Wechselkurs.',
+      );
+    }
+    if (counts.provisional > 0) {
+      throw new SettlementError(
+        'rates-pending',
+        `${counts.provisional} Position(en) mit vorläufigem Wechselkurs. Der Tageskurs steht ` +
+          'erst ein bis zwei Tage nach dem Belegdatum fest.',
+      );
+    }
 
     await tx
       .update(settlements)
       .set({ status: 'submitted', submittedAt: sql`now()`, updatedAt: sql`now()` })
       .where(and(eq(settlements.id, settlementId), eq(settlements.userId, userId)));
   });
-
-  return (await getSettlement(userId, settlementId))!;
 }

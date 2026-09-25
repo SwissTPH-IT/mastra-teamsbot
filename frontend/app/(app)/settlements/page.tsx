@@ -13,7 +13,7 @@ import { fetchSettlements, type ApiSettlement } from "@/lib/api/settlements";
 import {
   STATUS_STYLE,
   formatPeriod,
-  formatTotals,
+  formatSettlementTotal,
   itemCount,
   settlementMeta,
 } from "@/lib/settlements/format";
@@ -102,7 +102,7 @@ function SettlementRow({ settlement }: { settlement: ApiSettlement }) {
       </span>
       <span className="text-ink-3 text-[12.5px]">{itemCount(settlement.receiptCount)}</span>
       <span className="tabular text-right text-base font-medium">
-        {formatTotals(settlement.totals)}
+        {formatSettlementTotal(settlement.total)}
       </span>
     </Link>
   );
