@@ -160,7 +160,6 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
               </span>
               {rest.length > 0 ? (
                 <span className="tabular text-ink-2 -mt-1 truncate text-[11.5px]">
-                  + {formatTotals(rest)}
                 </span>
               ) : null}
             </Link>
