@@ -62,6 +62,11 @@ export class ApiError extends Error {
     message: string,
     /** Fachlicher Grund, wenn der Dienst einen nennt ("locked", "incomplete", ...). */
     readonly code?: string,
+    /**
+     * Die Eingabefelder, die der Dienst abgelehnt hat. Zusammen mit `code`
+     * formuliert die Oberflaeche damit selbst - der Text in `message` ist Deutsch.
+     */
+    readonly fields?: string[],
   ) {
     super(message);
     this.name = "ApiError";
@@ -85,6 +90,11 @@ export function isAuthError(error: unknown): boolean {
  */
 export function isUnlinkedAccount(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 403 || error.status === 409);
+}
+
+/** Der Dienst hat Eingaben abgelehnt (400). */
+export function isRejected(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 400;
 }
 
 export function isNotFound(error: unknown): boolean {
@@ -159,9 +169,14 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     // Der Dienst antwortet einheitlich mit { error: "<Text>" }. Der Text ist
     // Deutsch (so ist der Dienst gebaut) und wird deshalb NICHT durchgereicht,
     // wo die Oberflaeche selbst erklaeren kann - siehe die Empty States.
-    const body = payload as { error?: string; code?: string } | undefined;
+    const body = payload as { error?: string; code?: string; fields?: string[] } | undefined;
     const message = body?.error ?? `HTTP ${response.status} ${response.statusText}`;
-    throw new ApiError(response.status, message, body?.code);
+    throw new ApiError(
+      response.status,
+      message,
+      typeof body?.code === "string" ? body.code : undefined,
+      Array.isArray(body?.fields) ? body.fields : undefined,
+    );
   }
 
   return payload as T;

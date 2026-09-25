@@ -22,6 +22,7 @@ import { authenticate, type AuthState } from './auth';
 import { identityRoutes } from './routes/identity';
 import { receiptRoutes } from './routes/receipts';
 import { settlementRoutes } from './routes/settlements';
+import { errorDetail } from './validate';
 
 type Env = { Variables: { auth: AuthState } };
 
@@ -102,7 +103,9 @@ const SETTLEMENT_ERROR_STATUS = {
 
 app.onError((error, c) => {
   if (error instanceof HTTPException) {
-    return c.json({ error: error.message }, error.status);
+    // `code`/`fields` additiv, wie bei den Fachfehlern unten: siehe
+    // ErrorDetail in validate.ts.
+    return c.json({ error: error.message, ...errorDetail(error) }, error.status);
   }
   // Fachliche Fehler aus dem Repository. Sie tragen ihre Meldung selbst, weil
   // nur das Repository weiss, WARUM ein Statement 0 Zeilen traf. `code` ist
