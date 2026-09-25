@@ -146,7 +146,7 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
             <Link
               key={status}
               href="/settlements"
-              className="border-line hover:bg-surface flex flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] first:border-l-0"
+              className="border-line hover:bg-surface flex min-w-0 flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] first:border-l-0"
             >
               <span className="text-ink-2 flex items-center gap-[6px] text-[12.5px]">
                 <span className={`h-[6px] w-[6px] rounded-full ${STATUS_STYLE[status].dot}`} />
@@ -158,6 +158,11 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
               <span className="text-ink-3 text-[11.5px]">
                 {list.length === 1 ? "1 settlement" : `${list.length} settlements`}
               </span>
+              {rest.length > 0 ? (
+                <span className="tabular text-ink-2 -mt-1 truncate text-[11.5px]">
+                  + {formatTotals(rest)}
+                </span>
+              ) : null}
             </Link>
           );
         })}
