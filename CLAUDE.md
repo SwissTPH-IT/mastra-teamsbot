@@ -20,6 +20,17 @@ npm run teams:manifest   # TEAMS_APP_ID=<guid> node teams-app/build.mjs -> teams
 
 `DATABASE_URL=postgres://mastra:mastra@localhost:5432/mastra` for all of these locally.
 
+API service (`api/` — also an npm workspace of the repo root, Hono):
+
+```bash
+npm run dev --workspace api        # tsx watch, http://localhost:4000
+npm run typecheck --workspace api
+```
+
+Needs `DATABASE_URL` and `API_SERVICE_TOKEN` (min. 32 chars — it throws on start
+without it). `ENTRA_TENANT_ID` / `ENTRA_API_AUDIENCE` are optional; without them
+only the service-token path works and user tokens get a 401.
+
 Frontend (`frontend/` — an **npm workspace of the repo root**, not a separate
 project; `npm install` runs at the root):
 
@@ -93,7 +104,7 @@ Key pieces (`src/mastra/`):
 - `agents/receipt-chat-agent.ts` + `tools/extract-receipt-tool.ts` — the former web chat path; the tool resolves `uploadId`s to paths and runs the workflow sequentially. No caller today (see Notes).
 - `agents/teams-agent.ts` + `channels/teams-receipt-handler.ts` — the Teams path. Message *with* image → start a review run. Message *without* → if `app.pending_reviews` has a row for this thread, it's the answer to a pending presentation (`classifyReply` → `run.resume()`); otherwise `defaultHandler` (the model, with the DB tools).
 - `channels/receipt-review-card.ts` + `channels/receipt-card-handlers.ts` + `channels/receipt-review-session.ts` — the presentation is an **Adaptive Card** (Bestätigen / Anpassen / Abbrechen). A card click is not a message in Teams: the adapter sees `value.actionId` and routes it to `chat.processAction`, so the message handlers never see it. Own handlers therefore hang off `agent.getChannels().sdk` (`onAction` / `onModalSubmit`), registered once at startup in `index.ts` — not on the first receipt, or a card posted before a deploy would be dead after it. Mastra registers its own catch-all `onAction` for tool approvals and ignores foreign ids; handlers are additive, hence the `receipt-review:` prefix, with the runId in the action id so a stale card cannot confirm a newer receipt. `receipt-review-session.ts` is the shared middle of both paths (resume + report): whether a booking is written must not depend on clicking versus typing. A card cannot carry inputs (`CardChild` has none) — so "Anpassen" is a button with `actionType: 'modal'` (→ `msteams: task/fetch`) opening a Teams dialog for exactly the four confirmable fields: date, currency, tax, total. Dialog input goes through `applyReviewEdits()` in `receipts/candidate.ts` — the same parsers as extraction; empty means null, unreadable re-opens the dialog with the message instead of silently storing null. The dialog submit *is* the confirmation (`resumeData.kind === 'edit'`). Free text in the thread still works and re-presents the card.
-- `tools/receipt-db-tools.ts` + `tools/tool-context.ts` — four narrow tools, no generic SQL.
+- `tools/receipt-db-tools.ts` + `tools/tool-context.ts` + `api-client.ts` — four narrow tools, no generic SQL. They call the **API service** (`api/`, Hono) over HTTP, not Drizzle: the agent can only do what the service exposes. Same in- and output schemas as before. `userId` travels as `X-Subject-User` and is never a tool input. Still direct in the agent, deliberately: `app.pending_reviews` and schema `mastra` (PostgresStore).
 - `receipts/upload-store.ts` — allowed types (JPG/PNG/WebP/GIF only), `MAX_UPLOAD_BYTES` (15 MB), and `UPLOAD_ID_PATTERN`. The strict `<uuid><ext>` pattern *is* the path-traversal defense — don't loosen it.
 - `storage.ts` / `model.ts` — single points for `PostgresStore` (schema `mastra`, `disableInit: true`) and the `MASTRA_MODEL` choice.
 

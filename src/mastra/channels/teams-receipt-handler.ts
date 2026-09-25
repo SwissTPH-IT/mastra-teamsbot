@@ -21,6 +21,7 @@
 import type { ChannelHandler } from '@mastra/core/channels';
 import { createHash } from 'node:crypto';
 import { model } from '../model';
+import { receiptApi, type ConversationRef } from '../api-client';
 import { USER_ID_KEY } from '../tools/tool-context';
 import { initialReviewState } from '../workflows/receipt-review-workflow';
 import { reportOutcome, resumeReview, type ReviewResume } from './receipt-review-session';
@@ -29,7 +30,6 @@ import {
   getPendingReview,
   openPendingReview,
 } from '../../db/receipts';
-import { upsertIdentity, type ConversationRef } from '../../db/users';
 import {
   ALLOWED_UPLOAD_TYPES,
   MAX_UPLOAD_BYTES,
@@ -71,7 +71,6 @@ function readIdentity(
   userId: string,
   fullName?: string,
 ): {
-  teamsUserId: string;
   aadObjectId: string | null;
   tenantId: string | null;
   displayName: string | null;
@@ -80,7 +79,6 @@ function readIdentity(
   const activity = raw as TeamsActivity | undefined;
 
   return {
-    teamsUserId: userId,
     aadObjectId: activity?.from?.aadObjectId ?? null,
     tenantId: activity?.channelData?.tenant?.id ?? activity?.conversation?.tenantId ?? null,
     displayName: fullName ?? activity?.from?.name ?? null,
@@ -263,7 +261,7 @@ export const handleTeamsReceipt: ChannelHandler = async (thread, message, defaul
   // wieder mitgeschickt.
   const identity = readIdentity(message.raw, userId, message.author.fullName);
   try {
-    await upsertIdentity(identity);
+    await receiptApi.upsertIdentity({ userId, ...identity });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     logger?.warn(`[teams] Identität für ${userId} nicht gespeichert: ${reason}`);

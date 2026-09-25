@@ -1,34 +1,34 @@
 // Der Satz DB-Tools für den Agenten. Klein, eng typisiert, kein generisches SQL.
 //
-// Zwei Dinge liegen bewusst NICHT in der Entscheidungshoheit des Modells:
+// Seit dem API-Dienst greifen die Tools NICHT mehr selbst auf die Datenbank zu,
+// sondern rufen api/ über HTTP. Der Unterschied ist nicht Geschmack: vorher war
+// der volle Drizzle-Client eine Funktion entfernt, jetzt kann der Agent
+// ausschliesslich, was der Dienst als Endpunkt anbietet – und jeder Zugriff
+// steht dort im Log, mit Actor und Subject getrennt.
+//
+// Zwei Dinge liegen weiterhin nicht in der Entscheidungshoheit des Modells:
 //
 // 1. Mandantentrennung. In keinem inputSchema steht eine userId. Sie kommt über
-//    requireUserId() aus dem RequestContext und geht als erstes Argument in jede
-//    Repository-Funktion, die sie an jedes WHERE hängt. Ein Nutzer kann keine
-//    fremden Belege lesen oder ändern, auch nicht, wenn er den Agenten explizit
-//    darum bittet.
-// 2. Idempotenz. createReceipt läuft als Upsert gegen (user_id, file_hash),
-//    nicht als blindes Insert.
-//
-// Fachdaten laufen über Drizzle (src/db/receipts.ts), nicht über store.db /
-// store.pool – Direktzugriff auf den Store ist laut Referenz eine Umgehung der
-// Storage-Logik für Low-Level-Sonderfälle.
+//    requireUserId() aus dem RequestContext und geht als X-Subject-User an die
+//    API, die sie an jedes WHERE hängt. Ein Nutzer kann keine fremden Belege
+//    lesen oder ändern, auch nicht, wenn er den Agenten explizit darum bittet.
+// 2. Idempotenz. create-receipt läuft als Upsert gegen (user_id, file_hash),
+//    nicht als blindes Insert – das entscheidet die API, nicht der Aufrufer.
 
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import {
-  getReceipt,
-  listReceipts,
-  saveReceipt,
-  searchReceipts,
-  updateReceipt,
-  type ReceiptPatch,
-} from '../../db/receipts';
-import type { ReceiptRow } from '../../db/schema';
+import { receiptApi, type ApiReceipt } from '../api-client';
 import { candidateSchema } from '../receipts/candidate';
 import { requireUserId } from './tool-context';
 
-/** Was der Agent von einer Belegzeile zu sehen bekommt. Ohne rawExtraction – zu gross. */
+/**
+ * Was der Agent von einer Belegzeile zu sehen bekommt.
+ *
+ * Bewusst enger als die Antwort der API: rawExtraction gibt es dort ohnehin
+ * nicht mehr, und die Detailfelder (Zwischensumme, Steuersatz, Dateireferenz)
+ * braucht das Modell für seine Antworten nicht. Was das Modell sieht,
+ * entscheidet dieses Tool – was der Dienst herausgibt, entscheidet der Dienst.
+ */
 const receiptViewSchema = z.object({
   id: z.string(),
   merchant: z.string().nullable(),
@@ -44,20 +44,20 @@ const receiptViewSchema = z.object({
   createdAt: z.string(),
 });
 
-function toView(row: ReceiptRow) {
+function toView(receipt: ApiReceipt) {
   return {
-    id: row.id,
-    merchant: row.merchant,
-    receiptDate: row.receiptDate,
-    totalAmount: row.totalAmount,
-    currency: row.currency?.trim() ?? null,
-    vatAmount: row.vatAmount,
-    category: row.category,
-    receiptType: row.receiptType,
-    paymentMethod: row.paymentMethod,
-    confidence: row.confidence,
-    issues: Array.isArray(row.issues) ? (row.issues as string[]) : [],
-    createdAt: row.createdAt.toISOString(),
+    id: receipt.id,
+    merchant: receipt.merchant,
+    receiptDate: receipt.receiptDate,
+    totalAmount: receipt.totalAmount,
+    currency: receipt.currency,
+    vatAmount: receipt.vatAmount,
+    category: receipt.category,
+    receiptType: receipt.receiptType,
+    paymentMethod: receipt.paymentMethod,
+    confidence: receipt.confidence,
+    issues: receipt.issues,
+    createdAt: receipt.createdAt,
   };
 }
 
@@ -86,14 +86,17 @@ export const createReceiptTool = createTool({
   execute: async ({ candidate, fileHash, fileReference }, context) => {
     const userId = requireUserId(context);
 
-    const row = await saveReceipt(userId, {
+    const receipt = await receiptApi.create({
+      userId,
       candidate,
       fileHash,
       fileReference,
+      // Ein diktierter Beleg hat keinen Modell-Output aus der Extraktion; dann
+      // ist der Kandidat selbst das Rohmaterial, wie vorher.
       rawExtraction: candidate,
     });
 
-    return { receipt: toView(row) };
+    return { receipt: toView(receipt) };
   },
 });
 
@@ -113,8 +116,8 @@ export const listReceiptsTool = createTool({
   }),
   execute: async ({ limit, from, to }, context) => {
     const userId = requireUserId(context);
-    const rows = await listReceipts(userId, { limit, from, to });
-    return { receipts: rows.map(toView), count: rows.length };
+    const result = await receiptApi.list({ userId, limit, from, to });
+    return { receipts: result.receipts.map(toView), count: result.count };
   },
 });
 
@@ -135,10 +138,11 @@ export const searchReceiptsTool = createTool({
     receipts: z.array(receiptViewSchema),
     count: z.number(),
   }),
-  execute: async (input, context) => {
+  execute: async ({ query, ...filter }, context) => {
     const userId = requireUserId(context);
-    const rows = await searchReceipts(userId, input);
-    return { receipts: rows.map(toView), count: rows.length };
+    // Dieselbe Route wie list-receipts: mit `q` sucht die API, ohne listet sie.
+    const result = await receiptApi.list({ userId, q: query, ...filter });
+    return { receipts: result.receipts.map(toView), count: result.count };
   },
 });
 
@@ -166,23 +170,16 @@ export const updateReceiptTool = createTool({
   execute: async ({ receiptId, ...patch }, context) => {
     const userId = requireUserId(context);
 
-    // Existiert der Beleg nicht ODER gehört er jemand anderem, kommt hier null
-    // zurück – für den Nutzer ununterscheidbar, und das ist Absicht.
-    const existing = await getReceipt(userId, receiptId);
-    if (!existing) {
-      return {
-        receipt: null,
-        updated: false,
-        message: `Kein Beleg mit der ID ${receiptId} gefunden.`,
-      };
-    }
-
-    const row = await updateReceipt(userId, receiptId, patch as ReceiptPatch);
+    // Ein Beleg, der nicht existiert, und einer, der jemand anderem gehört,
+    // sind hier ununterscheidbar: die API antwortet in beiden Fällen mit 404.
+    // Das ist Absicht – eine geratene id darf nicht verraten, dass sie
+    // existiert.
+    const receipt = await receiptApi.update(userId, receiptId, patch);
 
     return {
-      receipt: row ? toView(row) : null,
-      updated: row !== null,
-      message: row ? 'Beleg aktualisiert.' : `Kein Beleg mit der ID ${receiptId} gefunden.`,
+      receipt: receipt ? toView(receipt) : null,
+      updated: receipt !== null,
+      message: receipt ? 'Beleg aktualisiert.' : `Kein Beleg mit der ID ${receiptId} gefunden.`,
     };
   },
 });
