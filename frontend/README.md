@@ -1,190 +1,255 @@
-# Belege – Weboberfläche
+# Spesen – Weboberfläche
 
-Read-only-Oberfläche auf die erfassten Belegdaten: ansehen, durchsuchen,
-als CSV exportieren. Sie ist die Sicht des Finanzteams **über alle Nutzer**.
+Die Selbstverwaltung der eigenen Belege: ansehen, prüfen, Kategorie und Belegart
+korrigieren, als CSV exportieren. Nach dem Login sieht **jeder nur seine
+eigenen** Belege.
 
-Erfasst wird nichts hier. Belege kommen über Microsoft Teams herein, der
-Human-in-the-Loop-Flow des Agenten legt sie dem Nutzer vor, und erst nach
-seiner Bestätigung entsteht eine Zeile in `app.receipts`. Diese Oberfläche
-liest diese Zeilen – nicht mehr.
+Erfasst wird hier nichts. Belege kommen über Microsoft Teams herein, der
+Human-in-the-Loop-Flow des Agenten legt sie dem Nutzer vor, und erst nach seiner
+Bestätigung entsteht eine Zeile in `app.receipts`. Diese Oberfläche ist die Sicht
+darauf.
 
-## Was sie bewusst nicht ist
+Grundlage ist das Mockup „Swiss TPH Expenses" (`dev/Swiss TPH Expenses.html`).
+Umgesetzt ist daraus der Belegteil; die Abrechnungen sind im Entwurf enthalten
+und hier **sichtbar ausgegraut** (siehe „Was ausgegraut ist und warum").
 
-- **Kein Upload.** Der Weg läuft über Teams.
-- **Kein Chat, kein assistant-ui, kein LLM-Aufruf.** Auf dieser Seite des Flows
-  gibt es keinen AI-Use-Case, und eine Chat-Oberfläche zwischen Nutzer und
-  Tabelle macht das Filtern langsamer, nicht schneller. Die Datenzugriffsschicht
-  (`lib/receipts/`) ist von der UI getrennt, damit AI-Funktionen später ein
-  Zusatz sein können und keine Neuentwicklung.
-- **Nicht schreibend.** Es gibt keine Bearbeitungsfunktion und keinen
-  schreibenden Endpunkt. Korrekturen laufen über den Teams-Flow, wo der
-  Korrektur-Agent und die Bestätigungsrunde sitzen.
-- **Nicht der Eigentümer des Schemas.** Keine Migrationen, keine Tabellen-
-  definition. Beides gehört dem Agent-Repo.
+## Variante A: die Oberfläche spricht nur mit der API
 
-## Kein Login – und warum das hier vertretbar war
+Der entscheidende Unterschied zur Vorgängerfassung: **keine Datenbankverbindung.**
+Kein Pool, kein Drizzle, kein Schema-Import. Alles läuft über den Belegdienst in
+`api/`.
 
-Diese Oberfläche ist **unauthentifiziert**. Es gibt kein Login, keine Rollen,
-keine Session und keinen Entra-ID-Anschluss. Das ist eine bewusste Entscheidung
-für diese Version, nicht ein Vergessen:
+```
+Browser ─► Frontend (Next.js, Server Components)
+             Entra-Login (Auth.js) ──► Session mit `oid`
+             │
+             └─ lib/api/client.ts ──► receipt-api
+                  Authorization: Bearer <API_SERVICE_TOKEN>   wer ruft
+                  X-Subject-Aad: <oid aus der Session>        für wen
+                                        │
+                                        └─ app.users: oid -> teams_user_id
+                                           -> jedes WHERE bekommt diese userId
+```
 
-- Die Zielgruppe ist ein kleines, festes Finanzteam.
-- Der Zugang wird über die Erreichbarkeit geregelt, nicht über Identität.
-- Auth wäre in dieser Version der grössere Teil der Arbeit gewesen, ohne dass
-  der Funktionsumfang (lesen und exportieren) davon abhängt.
+Drei Dinge folgen daraus, und sie sind der Grund für den Umbau:
 
-**Was das heisst:** wer die URL hat, sieht die Belegdaten aller Nutzer. Die
-Mandantentrennung des Teams-Bots gilt hier ausdrücklich nicht – das Frontend ist
-eine übergreifende Ansicht mit dem Nutzer als Datenfeld, nicht als
-Berechtigungsgrenze.
+1. **Die Mandantentrennung liegt an einer Stelle.** Früher gab es zwei Lesepfade
+   auf `app.receipts` (Agent und Frontend) und damit zwei Orte, an denen ein
+   Berechtigungsfilter richtig sein musste. Jetzt entscheidet der Dienst, und die
+   Oberfläche kennt die Teams-userId nicht einmal.
+2. **Es gibt nichts zu weiten.** Der frühere `ReceiptScope` bedeutete „alle
+   Nutzer" und war der Einhängepunkt für später. Den braucht es nicht mehr: es
+   gibt keinen Parameter, mit dem diese Anwendung mehr sehen könnte.
+3. **Das Verbindungsbudget wird kleiner.** Der eigene Pool (3 Verbindungen von
+   rund 20) ist weg.
 
-**Damit Auth ohne Umbau nachrüstbar bleibt**, gibt es drei Vorkehrungen:
+**Was der Service-Token bedeutet.** Mit ihm darf dieser Prozess im Namen jedes
+Nutzers lesen – er ist ein vertrauenswürdiger Dienst, kein Nutzer. Deshalb gilt
+in `lib/api/client.ts` eine Regel ohne Ausnahme: als Subject geht ausschliesslich
+die `oid` aus der **Session** mit, niemals ein Wert aus einem Browser-Request. Es
+gibt bewusst keine Funktion, die ein Subject als Argument nimmt.
 
-1. `lib/receipts/scope.ts` – jede Abfrage nimmt einen `ReceiptScope` als erstes
-   Pflichtargument. Er bedeutet heute immer „alle Nutzer". Kommt Auth dazu, wird
-   nur `resolveScope()` ersetzt; kein Aufrufer ändert sich.
-2. `lib/receipts/where.ts` – die **einzige** Stelle, an der aus Scope und Filtern
-   eine WHERE-Bedingung wird. Keine Filterlogik in Komponenten.
-3. Der Export-Endpunkt nutzt dieselbe Query-Schicht wie die Ansicht
-   (`streamReceipts` → `buildReceiptWhere`). Ein späterer Berechtigungsfilter
-   kann daran nicht vorbeilaufen.
+Ein eigenes Zugriffstoken für die API (On-Behalf-Of) wäre die strengere Variante
+und braucht eine zweite App-Registrierung in Entra („expose an API" plus Scope).
+Sie ist nicht angelegt, und solange die Oberfläche nur die eigenen Belege liest
+und nur Kategorie und Belegart schreibt, braucht es sie nicht. Der Weg dorthin
+ist kurz: `auth.ts` fordert den Scope an, und `client.ts` schickt das Nutzertoken
+statt des Service-Tokens – der Dienst kann beides schon (`api/src/auth.ts`).
+
+## Der Login
+
+Auth.js (NextAuth v5) mit dem Entra-Provider, Session als verschlüsseltes Cookie
+(JWT-Strategie, keine Session-Tabelle – es gibt keine Datenbank).
+
+- Angefordert werden `openid profile email`. Mehr nicht: diese Oberfläche ruft
+  keine Graph-API. Das mitgelieferte Provider-Profil holt das Profilbild über
+  Graph; das ist hier durch ein eigenes `profile()` ersetzt.
+- Aus dem ID-Token wandern `oid` und `tid` in die Session. `oid` ist die Brücke
+  zu `app.users` und damit zu den Belegen.
+- Geschützt wird über `proxy.ts` (in Next 16 der Nachfolger von `middleware.ts`)
+  mit einer **Positivliste des Öffentlichen**: `/api/healthz`, `/api/auth/*` und
+  `/signin`. Alles andere braucht eine Session. Umgekehrt wäre jede neue Route
+  versehentlich öffentlich.
+- Sitzungsdauer 12 Stunden. Der Default von 30 Tagen passt nicht zu Spesendaten
+  einzelner Personen, und es gibt kein Zugriffstoken, dessen Ablauf die Sitzung
+  sonst begrenzen würde.
+
+**Wer angemeldet ist, aber im System unbekannt** (kein Eintrag in `app.users` mit
+dieser `oid`), bekommt vom Dienst ein `403` und in der Oberfläche eine Erklärung
+statt einer leeren Tabelle: die Verknüpfung entsteht beim ersten Beleg im
+Teams-Chat. Eine leere Liste wäre an dieser Stelle die falsche Auskunft.
 
 ## Aufbau
 
 ```
+auth.ts                       Auth.js-Konfiguration (Entra, oid/tid)
+proxy.ts                      Login-Pflicht mit Positivliste des Öffentlichen
 app/
-  belege/page.tsx            Tabelle: Filterleiste + Ergebnis (Server Component)
-  belege/[id]/page.tsx       Detailansicht, inkl. Belegbild
-  api/export/route.ts        CSV, serverseitig gestreamt
-  api/healthz/route.ts       Health-Check inkl. Datenbank
-  api/belege/[id]/bild/      Proxy auf das Belegbild beim Agenten
+  signin/page.tsx             Anmeldeseite (ein Knopf)
+  (app)/layout.tsx            Seitenleiste + Inhalt, verlangt eine Session
+  (app)/page.tsx              Startseite: Kennzahl, Abrechnungskacheln, letzte Belege
+  (app)/receipts/page.tsx     Liste: Filterleiste, Tabelle, Blätterer
+  (app)/receipts/[id]/        Detail: Bild, Prüfhinweis, Felder, Korrektur
+  (app)/settlements/page.tsx  Platzhalter, noch nicht gebaut
+  api/auth/[...nextauth]/     Anmeldevorgang
+  api/export/route.ts         CSV, serverseitig gestreamt
+  api/healthz/route.ts        Health-Check inkl. Belegdienst (ohne Login)
+  api/receipts/[id]/image/    Proxy auf das Belegbild beim Agenten
 lib/
-  db/client.ts               eigener kleiner Pool + Drizzle
-  receipts/scope.ts          ReceiptScope        ← Einhängepunkt für Auth
-  receipts/query-params.ts   URL ⇄ Abfrage
-  receipts/where.ts          buildReceiptWhere   ← die eine Filterstelle
-  receipts/queries.ts        list / count / get / stream
-  receipts/format.ts         Intl-Formatierung (de-CH, Europe/Zurich)
-  export/csv.ts              CSV-Serialisierung
-  export/formats.ts          Format-Registry (heute nur csv)
+  api/client.ts               Der EINE Weg zu den Daten (server-only)
+  api/receipts.ts             Typisierte Aufrufe + der Vertrag mit dem Dienst
+  api/stream.ts               Alle Treffer seitenweise, für den Export
+  api/guard.ts                Aus einem Fehler des Dienstes wird ein Zustand der UI
+  receipts/query-params.ts    URL <-> Abfrage
+  receipts/categories.ts      Kategorien und Belegarten, Schlüssel + Aufschrift
+  receipts/review.ts          Wann ein Beleg nachgesehen werden muss
+  receipts/format.ts          Anzeigeformatierung (Intl)
+  export/                     CSV-Serialisierung und Format-Registry
+components/
+  shell/sidebar.tsx           Navigation, Nutzerblock, Abmelden
+  receipts/                   Zeilen, Filterleiste, Blätterer, Zustände, Formular
 ```
 
-Die gesamte UI besteht aus **Server Components**; es gibt keine
-`"use client"`-Komponente außer der Fehlergrenze (`app/belege/error.tsx`, die
-muss eine sein). Möglich ist das, weil der komplette Filter-, Sortier- und
-Seitenzustand in der URL steht: die Filterleiste ist ein `GET`-Formular, die
-Spaltenköpfe und die Paginierung sind Links. Damit sind Ansichten teilbar, der
-Zurück-Button funktioniert, und es gibt keinen Client-Zustand, der mit der URL
-synchron gehalten werden müsste.
+Der Zustand der Ansicht steht vollständig in den **Query-Parametern** und
+nirgends sonst: eine gefilterte Liste ist teilbar, der Zurück-Button
+funktioniert, und `/api/export` parst exakt dieselben Parameter wie die Seite.
+Was in der Tabelle steht, ist damit auch das, was in der Datei landet.
 
-Aus demselben Grund **kein TanStack Table**: Paginierung, Sortierung und
-Filterung laufen serverseitig, es bleibt nichts, was eine Tabellen-Bibliothek
-leisten könnte. Käme später clientseitige Spaltenauswahl oder Row-Selection
-dazu, wäre sie ein Zusatz an einer Stelle.
+## Was ausgegraut ist und warum
 
-### Das Schema wird importiert, nicht dupliziert
+Sichtbar und erkennbar deaktiviert, nicht entfernt: so ist zu sehen, wohin das
+gehört, ohne es anklicken zu können.
 
-`app`-Schema und Migrationen gehören dem Agent-Repo (`src/db/schema.ts`,
-`drizzle/`). Das Frontend importiert es:
+| Element | Grund |
+|---|---|
+| Navigationspunkt **Settlements**, die vier Statuskacheln auf der Startseite, „Assign to settlement" | Es gibt weder `app.expense_reports` noch Endpunkte dafür (Plan, Phase 5). Eine „0.00" pro Kachel würde behaupten, es gebe keine Abrechnungen – statt zu sagen, dass es sie noch nicht gibt. |
+| **Add expense without receipt** | Entworfen (Betragsgrenze, Begründungspflicht, Fremdwährungsfrage), aber weder im Schema noch im Dienst vorhanden: `app.receipts` verlangt Dateireferenz und Datei-Hash. |
+| Filter **Unassigned only**, **With receipt**, **Without receipt** | Brauchen Abrechnungen bzw. selbst eingetragene Belege. |
+| Spalte **Assignment** | Bleibt stehen und zeigt „not assigned". Sie später wieder einzusetzen würde die Spaltenbreiten zweimal verschieben. |
+| **Capture in Teams** | Ein echter Deep Link braucht die Bot-ID des Tenants. Mit `TEAMS_CHAT_URL` wird der Knopf aktiv, ohne bleibt er deaktiviert – besser als eine geratene URL. |
 
-```ts
-import { receipts } from "mastra-teamsbot/db/schema";
-```
+## Abweichungen vom Mockup
 
-Möglich über einen **npm-Workspace** im Repo-Root (`"workspaces": ["frontend"]`)
-plus `transpilePackages: ['mastra-teamsbot']` in `next.config.ts`. Zwei Gründe
-für diesen Weg statt eines Pfad-Alias auf `../src/db`:
-
-- Ein Import ausserhalb der Next-Projektwurzel bräuchte
-  `experimental.externalDir`, und das ist seit Next 15 defekt
-  ([vercel/next.js#81177](https://github.com/vercel/next.js/issues/81177)).
-- npm hoistet `drizzle-orm` dadurch nach `/node_modules` – es gibt genau **eine**
-  Kopie. Bei zwei Kopien kämen die Tabellenobjekte aus der einen und der
-  Drizzle-Client aus der anderen; das sind nominell verschiedene Typen und fällt
-  erst beim Query-Bauen auf.
-
-Auf `mastra_*`-Tabellen greift das Frontend nie zu. Das ist Framework-Zustand
-von Mastra, kein Datenmodell.
+- **Kein Blätterer im Entwurf.** Der Dienst liefert höchstens 200 Zeilen pro
+  Aufruf, ein Jahr Belege sind mehr. Der Blätterer ist in der Formensprache der
+  Filterleiste gehalten.
+- **Kein Export im Entwurf.** Der CSV-Export gehört zur bestehenden Oberfläche;
+  ihn wegzulassen wäre ein Rückschritt. Er läuft durch dieselben Filter wie die
+  Liste.
+- **Kein Suchfeld** – wie im Entwurf. Der Dienst kann suchen, deshalb wird `?q=`
+  weiter aus der URL gelesen; ein Eingabefeld gibt es nicht.
+- **Rohwerte der Extraktion** zeigt der Entwurf im Detail. Der Dienst gibt sie
+  bewusst nicht heraus (`rawExtraction` und der Datei-Hash verlassen ihn nie).
+  Stattdessen steht dort ein Satz, damit nicht gesucht wird, was es nicht gibt.
+- **Abmelden statt Einstellungen** in der Seitenleiste: Einstellungen gibt es
+  nicht, einen Weg aus der Anmeldung braucht es.
+- **Keine Mehrfachauswahl** in der Liste. Ihre einzige Aktion im Entwurf ist
+  „Add to settlement".
+- **Nur Hell.** Der Entwurf definiert `color-scheme: light` und kein dunkles
+  Gegenstück; einen selbst erfundenen Dunkelmodus hätte niemand entschieden.
+- **Sprache.** Die Oberflächentexte sind englisch, 1:1 aus dem Entwurf – anders
+  als der übrige Code, dessen Kommentare und Fehlermeldungen deutsch sind (so
+  auch hier). Zahlen- und Datumsformate bleiben schweizerisch.
 
 ## Entwickeln
 
 ```bash
-docker compose up postgres -d          # im Repo-Root
-npm install                            # im Repo-Root – Workspace-Install
-DATABASE_URL=postgres://mastra:mastra@localhost:5432/mastra \
-  npm run db:deploy                    # im Repo-Root, legt die Schemas an
-
-cd frontend
-cp .env.example .env.local
+docker compose up postgres api -d      # Datenbank + Belegdienst
+cd frontend && cp .env.example .env.local
 npm run dev                            # http://localhost:3000
 ```
 
-`npm install` läuft im **Repo-Root**, nicht in `frontend/` – es ist ein
-Workspace. Ein `npm install` in `frontend/` legt ein eigenes `node_modules` an
-und hebelt genau das Hoisting aus, auf dem die einzelne `drizzle-orm`-Kopie
-beruht.
+`npm install` läuft **im Repo-Root**, nie in `frontend/` – es ist ein
+npm-Workspace (`"workspaces": ["frontend", "api"]`).
 
-Vor dem Pushen: `npm run typecheck && npm run build && npm run lint`.
+```bash
+npm run typecheck      # tsc --noEmit
+npm run lint           # oxlint && oxfmt --check
+npm run lint:fix
+npm run build          # next build (output: standalone)
+```
+
+Ohne konfigurierte Entra-App kommt man über `/signin` nicht hinaus. Zum Prüfen
+der Ansichten genügt eine App-Registrierung mit der lokalen Redirect-URI
+`http://localhost:3000/api/auth/callback/microsoft-entra-id`; die eigene `oid`
+muss in `app.users.aad_object_id` stehen, sonst zeigt die Oberfläche die
+Erklärung „nothing linked yet" (was dann korrekt ist).
 
 ## Zeitzonen und Zahlen
 
-Die zwei Fallen, die hier zählen:
+Zwei Details, die nach Stil aussehen und keiner sind:
 
-- **`receipt_date` ist ein `date`, `created_at` ein `timestamptz`.** Ein
-  Kalendertag durch eine Zeitzonenkonvertierung zu schicken verschiebt ihn –
-  `"2026-01-01"` wird als UTC-Mitternacht gelesen. Belegdaten werden deshalb
-  direkt aus dem `YYYY-MM-DD`-String formatiert, nur Zeitstempel gehen durch
-  `Intl.DateTimeFormat` mit `timeZone: 'Europe/Zurich'`. Siehe
-  `lib/receipts/format.ts`.
-- **Der Zeitraumfilter liegt auf dem Belegdatum, nicht auf dem
-  Erfassungszeitpunkt.** Ein Beleg vom 31.12. kann am 3.1. erfasst worden sein,
-  und für die Buchhaltung ist der 31.12. der relevante Tag.
-- **`numeric` kommt als String aus Postgres** (node-postgres parst es
-  absichtlich nicht, ein double hält den Wert nicht exakt). Für die Anzeige geht
-  er durch `Intl.NumberFormat('de-CH')`, im CSV bleibt er unangetastet – dort
-  wird nur der Dezimalpunkt getauscht.
+- **`receipt_date` ist ein Kalendertag**, `created_at` ein Zeitpunkt. Ein Tag
+  durch eine Zeitzonenkonvertierung zu schicken verschiebt ihn – „2026-01-01"
+  wird als UTC-Mitternacht gelesen und in Europe/Zurich zu 01:00 desselben Tags,
+  im Sommer zu 02:00, westlich von UTC zum Vortag. `lib/receipts/format.ts` hat
+  deshalb zwei getrennte Formatierer, und der Zeitraumfilter liegt bewusst auf
+  dem Belegdatum.
+- **Beträge sind Strings.** `numeric` wird absichtlich nicht als Zahl geparst –
+  ein double hält den Wert nicht exakt. Der Export gibt den String weiter und
+  tauscht nur das Dezimaltrennzeichen; nur die Anzeige geht durch `Number()`.
+
+Leere Felder zeigen einen Gedankenstrich, nie „0.00": ein nicht erkannter Betrag
+und ein Betrag von null sind zwei verschiedene Aussagen.
+
+## Prüfhinweis und Konfidenz
+
+Das Abzeichen „Review" und der Hinweiskasten im Detail hängen an zwei Signalen
+aus dem Dienst: gemeldeten `issues` des Extraktions-Agenten und einer Konfidenz
+unter 0.6 (`lib/receipts/review.ts` – die einzige Stelle, an der das entschieden
+wird).
+
+Die Konfidenz ist **deterministisch gerechnet** (Feldvollständigkeit und
+Summenprüfung, `computeConfidence()` im Agent-Repo), kein Modellurteil. Der
+Hinweis steht in der Oberfläche, weil eine Prozentzahl neben einem KI-Ergebnis
+sonst als Selbsteinschätzung gelesen wird.
+
+## Korrigieren
+
+Schreibend ist genau eine Stelle: Kategorie und Belegart auf der Detailseite
+(`PATCH /receipts/:id`). Das sind die beiden Felder, die der Extraktions-Agent
+bewusst leer lässt – sie müssen von Hand gesetzt werden können.
+
+Betrag, Datum und Währung bleiben dem Teams-Dialog vorbehalten: dort liegt das
+Belegbild daneben, und zwei Wege zu derselben Zahl sind einer zu viel. Ein leeres
+Auswahlfeld bedeutet „nicht gesetzt" und wird im Dienst zu `NULL`, nicht zu einem
+Leerstring.
+
+Das Formular ist ein echtes `<form>` mit einer Server Action und funktioniert
+ohne JavaScript.
 
 ## CSV-Export
 
-`GET /api/export?<dieselben Filter wie die Ansicht>[&format=csv][&delimiter=…]`
+`/api/export` mit denselben Query-Parametern wie die Liste. Serverseitig
+gestreamt: der Dienst wird seitenweise abgefragt (200 Zeilen), das erste Byte
+geht raus, bevor die letzte Seite geholt ist.
 
-Serverseitig erzeugt und gestreamt: der Export läuft durch dieselbe
-Query-Schicht wie die Ansicht (und damit durch denselben – heute leeren –
-Berechtigungsfilter), und ein Export über mehrere Jahre scheitert nicht am
-Browser. Geholt wird in Bändern von 1000 Zeilen per Keyset-Paginierung; ein
-grosses `OFFSET` würde die übersprungenen Zeilen jedes Mal mitlesen, und
-zwischen zwei Bändern eingefügte Zeilen würden das Fenster verschieben, sodass
-Zeilen doppelt oder gar nicht in der Datei landen.
+Für Excel mit CH/DE-Locale:
 
-Angewendet werden **alle** gesetzten Filter, nicht nur der Zeitraum – deshalb
-steht die Trefferzahl auf dem Knopf („412 Belege exportieren"). Es ist dieselbe
-Zahl wie in der Paginierung, aus derselben Funktion.
+- **UTF-8 mit BOM** – sonst rät Excel die Kodierung nach Codepage und zerlegt
+  jedes „ö" und „é", und Händlernamen sind voll davon.
+- **Semikolon** als Trennzeichen, **Komma** als Dezimaltrennzeichen. Bei
+  Komma-getrennten Dateien landet die ganze Zeile in einer Spalte.
+- **CRLF** als Zeilenende (RFC 4180).
 
-Zwei Details für Excel mit CH/DE-Locale:
-
-- **UTF-8 mit BOM.** Ohne rät Excel die Kodierung nach Codepage und zerlegt jedes
-  „ö" – und Händlernamen sind voll davon.
-- **Semikolon als Trennzeichen, Komma als Dezimaltrennzeichen.** Sonst landet die
-  ganze Zeile in einer Spalte. Über `?delimiter=comma` bzw. `?delimiter=tab`
-  umschaltbar, falls die Datei woanders weiterverarbeitet wird; bei Komma als
-  Trennzeichen bleibt der Dezimalpunkt ein Punkt, sonst wäre „1,50" nicht von
-  zwei Spalten zu unterscheiden.
-
-Dateiname mit Zeitraum, z. B. `belege_2026-01-01_2026-03-31.csv`.
-
-Ein `.xlsx`-Export ist absehbar gewünscht. `lib/export/formats.ts` ist die
-Registry dafür – ein zweites Format kommt daneben, ohne den Route Handler oder
-die Query-Schicht anzufassen. Implementiert ist jetzt nur CSV.
+Der erste Aufruf an den Dienst passiert **vor** der Antwort: ein Fehler muss
+auffallen, bevor das erste Byte geschrieben ist – sonst liegt eine halbe Datei im
+Download-Ordner.
 
 ## Umgebungsvariablen
 
-| Variable               | Pflicht         | Zweck                                                                                              |
-| ---------------------- | --------------- | -------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`         | **ja**          | Dieselbe Postgres-Instanz wie der Agent. Auf Railway als `${{ Postgres.DATABASE_URL }}`            |
-| `MASTRA_URL`           | für Belegbilder | Adresse des Agent-Service; nur `/api/belege/<id>/bild` braucht sie. Serverseitig, nicht im Browser |
-| `FRONTEND_DB_POOL_MAX` | nein            | Poolgrösse, Default 3                                                                              |
-| `PORT`                 | nein            | setzt Railway selbst; lokal 3000                                                                   |
-| `HOSTNAME`             | nein            | im Container `0.0.0.0` (setzt das Dockerfile)                                                      |
+Siehe `.env.example` – dort steht zu jedem Wert, warum er gebraucht wird.
 
-Dieselbe Liste als Vorlage in `.env.example`. Zum Deployment siehe
-`../README.md`, Abschnitt „Deployment auf Railway".
+| Variable | Pflicht | Zweck |
+|---|---|---|
+| `API_URL` | ja | Basis-URL des Belegdienstes |
+| `API_SERVICE_TOKEN` | ja | gemeinsames Geheimnis mit dem Dienst |
+| `AUTH_SECRET` | ja | verschlüsselt das Session-Cookie |
+| `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` / `_ISSUER` | ja | App-Registrierung |
+| `AUTH_URL` | hinter Proxy | öffentliche URL (Railway) |
+| `MASTRA_URL` | für Bilder | Agent-Service, hält die Belegdateien |
+| `API_TIMEOUT_MS` | nein | Default 15000 |
+| `TEAMS_CHAT_URL` | nein | Deep Link für „Capture in Teams" |
+
+Kein `NEXT_PUBLIC_*`: alle Aufrufe passieren serverseitig, weder Token noch
+interne Adressen erreichen den Browser.

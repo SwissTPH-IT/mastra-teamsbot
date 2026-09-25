@@ -42,14 +42,15 @@ npm run lint             # oxlint && oxfmt --check
 npm run lint:fix
 ```
 
-Never run `npm install` inside `frontend/`. It creates a nested `node_modules` and
-defeats the hoisting that keeps a single `drizzle-orm` copy — see "The frontend
-imports the schema" below.
+Never run `npm install` inside `frontend/`. It creates a nested `node_modules`
+that shadows the hoisted one, and the frontend then builds against a second copy
+of React/Next.
 
 Docker (all services): `docker compose up --build`. The images are production builds,
 so there is no hot reload inside the container — run `npm run dev` on the host instead.
-Frontend-only dev against a containerized backend: `docker compose up postgres mastra -d`,
-then `cd frontend && cp .env.example .env.local && npm run dev`.
+Frontend-only dev against a containerized backend: `docker compose up postgres api mastra -d`,
+then `cd frontend && cp .env.example .env.local && npm run dev`. The frontend needs
+`api` (all data) and `mastra` (receipt images only), not `DATABASE_URL`.
 
 Before pushing: `npm run typecheck && npm run build`.
 
@@ -60,8 +61,8 @@ Before pushing: `npm run typecheck && npm run build`.
 ## Architecture
 
 A receipt-capture app: images in, structured JSON out. **Capture happens only in
-Microsoft Teams.** The Next.js frontend is a read-only view on the captured data
-for the finance team.
+Microsoft Teams.** The Next.js frontend is each person's view of their own captured
+data — sign in with Entra, see, check and correct your own receipts, export them.
 
 ```
 Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
@@ -74,8 +75,10 @@ Teams ─► POST /api/agents/teams-agent/channels/teams/webhook
                                       │        (Button/Dialog über chat.onAction, oder Text)
                                       └─ persist-receipt ─► app.receipts
 
-Browser ─► /belege, /api/export ─► app.receipts   (read-only, Drizzle, server-side)
-           /api/belege/<id>/bild ─► GET /receipts/<uploadId>/file  (proxy to the agent)
+Browser ─► Frontend (Entra login, Auth.js)   ──► receipt-api ─► app.receipts
+             /, /receipts, /receipts/<id>          Bearer API_SERVICE_TOKEN
+             /api/export                           X-Subject-Aad: <oid>
+             /api/receipts/<id>/image ─► GET /receipts/<uploadId>/file (to the agent)
 ```
 
 Four invariants to preserve:
@@ -86,8 +89,9 @@ Four invariants to preserve:
 2. **Image bytes never travel through chat context.** Every entry point stores the file via
    `receipts/upload-store.ts`, gets an `uploadId`, and passes only file *paths* onward.
 3. **Nothing is written to the DB before the user confirms.** No write-then-clean-up.
-4. **The frontend is read-only and owns no schema.** No write routes, no migrations, no
-   table definitions, and it never touches `mastra_*` tables.
+4. **The frontend has no database.** No pool, no Drizzle, no schema import, no
+   migrations — every byte of receipt data comes from `api/`, and the only thing it
+   writes is `PATCH /receipts/:id` for category and receipt type.
 
 Key pieces (`src/mastra/`):
 
@@ -104,46 +108,64 @@ Key pieces (`src/mastra/`):
 - `receipts/upload-store.ts` — allowed types (JPG/PNG/WebP/GIF only), `MAX_UPLOAD_BYTES` (15 MB), and `UPLOAD_ID_PATTERN`. The strict `<uuid><ext>` pattern *is* the path-traversal defense — don't loosen it.
 - `storage.ts` / `model.ts` — single points for `PostgresStore` (schema `mastra`, `disableInit: true`) and the `MASTRA_MODEL` choice.
 
-### The frontend imports the schema, it does not own it
+### The frontend talks to the API, not to the database
 
 `frontend/` is an npm workspace of the repo root (`"workspaces": ["frontend", "api"]`) and
 imports `mastra-teamsbot/db/schema` — i.e. `src/db/schema.ts` — via
 `transpilePackages: ['mastra-teamsbot']`. Two reasons it is a workspace and not a
 path alias to `../src/db`:
 
-- An import outside the Next project root needs `experimental.externalDir`, which has
-  been broken since Next 15 (vercel/next.js#81177).
-- npm hoists `drizzle-orm` to the root `node_modules`, so there is exactly **one**
-  copy. With two copies the table objects come from one and the Drizzle client from
-  the other — nominally different types, and it only surfaces when building a query.
+Every read and the one write go through `frontend/lib/api/client.ts`, with two
+server-side headers:
 
-The frontend does **not** import `src/db/index.ts` or `src/db/pool.ts`: it holds its
-own smaller pool (`frontend/lib/db/client.ts`, `FRONTEND_DB_POOL_MAX`, default 3,
-lazily created so `next build` needs no `DATABASE_URL`). It also does not use
-`src/db/receipts.ts` — that repository enforces per-user tenancy, and the finance
-view is deliberately cross-user.
+```
+Authorization: Bearer <API_SERVICE_TOKEN>   who calls  (this service)
+X-Subject-Aad: <oid from the session>       on whose behalf
+```
 
-Three places carry the design intent, keep them that way:
+The service resolves `oid → teams_user_id` via `app.users` and puts that id in
+every `WHERE` (`api/src/auth.ts`). So the frontend never learns the Teams userId,
+and there is no `ReceiptScope` to widen any more — the former one meant "all users"
+and was the hook for adding auth; the hook is now the service.
 
-- `frontend/lib/receipts/scope.ts` — every query takes a `ReceiptScope` first. It
-  means "all users" today; replacing `resolveScope()` is the whole of adding auth.
-- `frontend/lib/receipts/where.ts` — the **only** place filters become a WHERE clause.
-  No filter logic in components.
-- `frontend/app/api/export/route.ts` — the export reuses that same query layer
-  (`streamReceipts`), so a later permission filter cannot be bypassed by exporting.
+**The service token is the thing to be careful with.** It lets this process act for
+any user. The rule in `client.ts` has no exception: the subject comes from the
+**session** (`oid` out of the signed ID token), never from a browser request, and
+there is deliberately no function that takes a subject as an argument. `client.ts`
+is `server-only`, so an accidental import into a client component fails the build.
 
-Two frontend details that look like style but are not:
+A per-user access token for the API (OBO) is the stricter variant and needs a second
+Entra app registration ("expose an API" + scope). It does not exist; the service
+already accepts user JWTs (`ENTRA_API_AUDIENCE`), so the switch is `auth.ts`
+requesting the scope and `client.ts` sending that token instead.
 
-- `receipt_date` is a `date`, `created_at`/`updated_at` are `timestamptz`. Never run a
-  calendar day through a timezone conversion — see `frontend/lib/receipts/format.ts`.
-  The date-range filter is on `receipt_date`, deliberately.
-- `numeric` arrives as a **string** from node-postgres. The CSV export keeps the
-  string and only swaps the decimal separator; only display goes through `Number()`.
+Login: Auth.js v5 (`frontend/auth.ts`), Entra provider, JWT session cookie, scope
+`openid profile email` only — the UI calls no Graph API, and the provider's default
+`profile()` (which fetches a Graph photo) is replaced. `frontend/proxy.ts` — in Next
+16 the successor to `middleware.ts` — gates everything with a **positive list of the
+public**: `/api/healthz`, `/api/auth/*`, `/signin`. The other way round every new
+route would be public by accident.
 
-There is no `app/belege/loading.tsx` on purpose: a `loading.tsx` also covers child
-segments, so `/belege/<id>` would start streaming before `notFound()` runs and the
-404 page would go out with status 200. The Suspense boundary sits in
-`app/belege/page.tsx` instead.
+Three frontend details that look like style but are not:
+
+- `receipt_date` is a calendar day, `created_at` a timestamp. Never run a calendar
+  day through a timezone conversion — see `frontend/lib/receipts/format.ts`. The
+  period filter is on `receipt_date`, deliberately.
+- Amounts are **strings** end to end. The CSV export keeps the string and only swaps
+  the decimal separator; only display goes through `Number()`.
+- An unlinked account (signed in, no `app.users` row for that `oid`) gets a `403` from
+  the service and an explanation in the UI, never an empty table. `isUnlinkedAccount()`
+  in `lib/api/client.ts`, rendered by `components/receipts/states.tsx`.
+
+There is no `app/(app)/receipts/loading.tsx` on purpose: a `loading.tsx` also covers
+child segments, so `/receipts/<id>` would start streaming before `notFound()` runs and
+the 404 page would go out with status 200. The Suspense boundary sits in
+`app/(app)/receipts/page.tsx` instead.
+
+The UI text is **English**, taken from the `dev/Swiss TPH Expenses.html` mockup;
+comments and error messages stay German like the rest of the repo. Settlements are
+designed but not built, and are visibly greyed out rather than hidden —
+`frontend/README.md` lists every greyed element and every deviation from the mockup.
 
 ### Routing and API gotchas
 
@@ -176,12 +198,12 @@ argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed i
 
 ## Conventions
 
-- Comments and all user-facing strings (agent instructions, error messages, tool descriptions) are **German**. `receipt-agent.ts` / `receipt-extraction-workflow.ts` internals are English. Match the file you're editing. The frontend is German throughout, including comments; its UI text avoids umlauts in a few identifiers only where a filename or CSV header travels into Excel.
+- Comments and all user-facing strings (agent instructions, error messages, tool descriptions) are **German**. `receipt-agent.ts` / `receipt-extraction-workflow.ts` internals are English. Match the file you're editing. In the frontend, comments, commit-relevant prose and error logs are German, but the **UI text is English** — it comes verbatim from the mockup. Numbers and dates stay Swiss (de-CH).
 - Comments in this codebase explain *why* a non-obvious choice was made (route naming, `0.0.0.0` binding, sequential extraction). Keep that style rather than restating code.
 - **Deployment config lives in `.railway/railway.ts`** (Railway Infrastructure as Code), not in `railway.json`. Config as Code is deprecated: existing files work until 2026-12-01, and since 2026-08-28 a service that never used it **cannot opt in** — so the new frontend service could not have a `railway.frontend.json` at all. The file is applied by CLI (`railway config pull --force` → `plan` → `apply`), once per environment, never at deploy time. Read the `plan` output before applying; a service-name mismatch reads as create-new + destroy-old. `railway.json` / `railway.prune.json` still sit in the repo and still drive the agent and prune services; they get deleted right after the first successful `apply`, not before.
 - In that file: `dockerfilePath` is a per-service option, so one repo serving three services needs no per-service config file. `DATABASE_URL` is a real reference (`db.env.DATABASE_URL`). Secrets use `preserve()` — never put them in the repo. `MASTRA_URL` must be a **literal** string with Railway's `${{Service.VAR}}` syntax, because a composed value cannot interpolate a reference object (`agent.env.RAILWAY_PRIVATE_DOMAIN` would stringify to `[object Object]`); `privateUrl()` wraps that.
 - The prune service is selected by `RUN_MODE=prune`, not a start command — `scripts/docker-entrypoint.sh` switches roles on that variable, because start commands from platform config were silently not applied in this project while variables demonstrably arrive.
-- The frontend image builds from the **repo root** context (`docker build -f frontend/Dockerfile .`), because it needs `src/db` and the root lockfile. The root `.dockerignore` therefore no longer excludes `frontend/`, and the agent's Dockerfile copies `frontend/package.json` so `npm ci --workspaces=false` can validate the lockfile.
+- The frontend image builds from the **repo root** context (`docker build -f frontend/Dockerfile .`), because `npm ci` needs the root lockfile plus every workspace's `package.json`. It no longer copies `src/db`. `output: standalone` leaves out both `.next/static` and `public/`, so the Dockerfile copies both — without `public/` the wordmark is missing. The root `.dockerignore` therefore no longer excludes `frontend/`, and the agent's Dockerfile copies `frontend/package.json` so `npm ci --workspaces=false` can validate the lockfile.
 - Persistence is split: structured data in Postgres (schemas `mastra` and `app`), receipt *images* still as files under `./data/uploads/`. `receipts.file_reference` holds `local:uploads/<id>` — there is no object store yet, and that prefix scheme exists so adding one is a data migration over one column.
 - `RECEIPT_DATA_DIR` defaults to `/app/data`, so running the backend outside Docker without setting it writes to an absolute container path.
 - Retention policies live in **one** place, `scripts/prune.mjs`, which passes them per call to `storage.prune()`. `src/mastra/storage.ts` deliberately configures none — two definitions would drift.
@@ -189,6 +211,6 @@ argument — `updateReceipt` matches on `(id, user_id)` precisely so a guessed i
 ## Notes
 
 - `README.md` (German) is the authoritative operational doc: env var table, Railway deployment, Azure Bot registration, and the two browser→Mastra wiring variants.
-- `frontend/README.md` covers the web UI on its own: layout, the CSV/Excel details, and why it is unauthenticated.
-- Known open issues by design: no auth on Studio, `POST /receipts/upload`, or the web UI (which shows every user's receipts — `frontend/lib/receipts/scope.ts` is where a permission filter goes); uploads are never garbage-collected.
+- `frontend/README.md` covers the web UI on its own: the API-only data path, the Entra login, what is greyed out, the deviations from the mockup, and the CSV/Excel details.
+- Known open issues by design: no auth on Studio or `POST /receipts/upload`; `GET /receipts/:uploadId/file` on the agent is unauthenticated too, which is why the frontend proxies it behind its own check (`app/api/receipts/[id]/image`); uploads are never garbage-collected. The web UI now requires a login and shows only the signed-in person's receipts.
 - `chatRoute()` with `receiptChatAgent` / `extract-receipt-tool` and `POST /receipts/upload` currently have **no caller** — the web upload path was removed with assistant-ui. They stay reachable via Studio and the REST API. `GET /receipts/:uploadId/file` *is* used: the detail page proxies the receipt image through it.

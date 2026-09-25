@@ -1,7 +1,8 @@
 # Build-Kontext ist das REPO-ROOT, nicht frontend/ - das Frontend ist ein
-# npm-Workspace dieses Repos und importiert das Drizzle-Schema aus src/db.
-# Entsprechend: `docker build -f frontend/Dockerfile .` (docker-compose setzt
-# das ueber `context: .`, Railway baut ohnehin vom Repo-Root).
+# npm-Workspace dieses Repos, und `npm ci` braucht das Lockfile des Roots samt
+# der package.json jedes Workspace-Mitglieds. Entsprechend:
+# `docker build -f frontend/Dockerfile .` (docker-compose setzt das ueber
+# `context: .`, Railway baut ohnehin vom Repo-Root).
 
 FROM node:22-slim AS build
 
@@ -15,13 +16,12 @@ COPY frontend/package.json ./frontend/
 COPY api/package.json ./api/
 RUN npm ci
 
-# Nur das DB-Verzeichnis aus dem Agent-Repo, nicht src/ komplett: mehr braucht
-# das Frontend nicht, und alles Weitere wuerde den Cache unnoetig invalidieren.
-COPY src/db ./src/db
+# Nur frontend/: seit dem Umbau auf den API-Dienst importiert diese Anwendung
+# nichts mehr aus src/ - kein Schema, kein Repository, kein Drizzle.
 COPY frontend ./frontend
 
-# Der Build braucht keinen DATABASE_URL: alle Seiten sind force-dynamic und der
-# Pool entsteht erst beim ersten Request (siehe lib/db/client.ts).
+# Der Build braucht weder Datenbank noch Geheimnisse: alle Seiten sind dynamisch
+# und jeder Zugriff passiert erst beim Request (siehe lib/api/client.ts).
 RUN npm run build --workspace frontend
 
 
@@ -40,8 +40,11 @@ ENV PORT=3000
 # Agenten. Die Struktur spiegelt outputFileTracingRoot, deshalb liegt der Server
 # unter frontend/.
 COPY --from=build /repo/frontend/.next/standalone ./
-# Die statischen Assets kopiert Next nicht selbst mit.
+# Die statischen Assets kopiert Next nicht selbst mit - beide Verzeichnisse
+# fehlen im Standalone-Baum. Ohne public/ fehlt die Wortmarke in der
+# Seitenleiste und auf der Anmeldeseite.
 COPY --from=build /repo/frontend/.next/static ./frontend/.next/static
+COPY --from=build /repo/frontend/public ./frontend/public
 
 EXPOSE 3000
 

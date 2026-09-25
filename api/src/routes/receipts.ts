@@ -12,8 +12,12 @@ import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import {
+  countReceipts,
   getReceipt,
+  listCategories,
   listReceipts,
+  RECEIPT_SORT_FIELDS,
+  summarizeReceipts,
   saveReceipt,
   searchReceipts,
   updateReceipt,
@@ -31,11 +35,14 @@ function toView(row: ReceiptRow) {
   return {
     id: row.id,
     merchant: row.merchant,
+    merchantAddress: row.merchantAddress,
+    merchantTaxId: row.merchantTaxId,
     receiptDate: row.receiptDate,
     receiptTime: row.receiptTime,
     referenceNumber: row.referenceNumber,
     totalAmount: row.totalAmount,
     subtotalAmount: row.subtotalAmount,
+    discountAmount: row.discountAmount,
     vatAmount: row.vatAmount,
     vatRate: row.vatRate,
     // char(3) kommt rechtsgepolstert aus Postgres.
@@ -45,6 +52,12 @@ function toView(row: ReceiptRow) {
     receiptType: row.receiptType,
     confidence: row.confidence,
     issues: Array.isArray(row.issues) ? (row.issues as string[]) : [],
+    /**
+     * Nur die Anzahl, nicht die Positionen. Die Detailansicht zeigt "3 items";
+     * die Positionen selbst braucht heute niemand ausserhalb des Dienstes, und
+     * was nicht rausgeht, muss auch nicht versioniert werden.
+     */
+    lineItemCount: Array.isArray(row.lineItems) ? row.lineItems.length : 0,
     fileReference: row.fileReference,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -57,9 +70,18 @@ const listQuerySchema = z.object({
   q: z.string().min(1).optional(),
   from: isoDate.optional(),
   to: isoDate.optional(),
+  category: z.string().min(1).optional(),
   minAmount: z.string().optional(),
   maxAmount: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(50).optional(),
+  /**
+   * 200 ist die groesste Seitengroesse der Weboberflaeche. Der Agent fragt
+   * deutlich kleinere Seiten – die Grenze steht hier, damit eine geratene
+   * Zahl aus der URL keine Vollabfrage wird.
+   */
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  sort: z.enum(RECEIPT_SORT_FIELDS).optional(),
+  dir: z.enum(['asc', 'desc']).optional(),
 });
 
 const createSchema = z.object({
@@ -74,16 +96,27 @@ const createSchema = z.object({
   rawExtraction: z.unknown().optional(),
 });
 
+/**
+ * Korrigierbare Felder. Jedes darf null sein, und ein Leerstring IST null.
+ *
+ * Das ist dieselbe Regel wie bei der Extraktion (candidate.ts): leer heisst
+ * "nicht gesetzt", nicht "0.00" und nicht "". Ohne die Umwandlung landet in
+ * `category` ein Leerstring, der in jeder Liste als gesetzte Kategorie
+ * mitzaehlt und im Filter-Dropdown als namenlose Zeile auftaucht.
+ */
+const emptyToNull = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(value => (value === '' ? null : value), schema.nullable());
+
 const patchSchema = z
   .object({
-    merchant: z.string(),
-    receiptDate: isoDate,
-    totalAmount: z.string(),
-    currency: z.string().length(3),
-    vatAmount: z.string(),
-    category: z.string(),
-    receiptType: z.string(),
-    paymentMethod: z.string(),
+    merchant: emptyToNull(z.string()),
+    receiptDate: emptyToNull(isoDate),
+    totalAmount: emptyToNull(z.string()),
+    currency: emptyToNull(z.string().length(3)),
+    vatAmount: emptyToNull(z.string()),
+    category: emptyToNull(z.string()),
+    receiptType: emptyToNull(z.string()),
+    paymentMethod: emptyToNull(z.string()),
   })
   .partial();
 
@@ -116,11 +149,39 @@ export const receiptRoutes = new Hono<Env>()
     const userId = subjectOf(c);
     const { q, ...filter } = c.req.valid('query');
 
-    const rows = q
-      ? await searchReceipts(userId, { query: q, ...filter })
-      : await listReceipts(userId, filter);
+    // `count` ist diese Seite, `total` sind alle Treffer unter denselben
+    // Filtern. Die Oberflaeche braucht beides: Zeilen zum Anzeigen und die
+    // Gesamtzahl fuer Paginierung und Export-Aufschrift. Der Agent liest
+    // weiterhin nur `count` – das Feld ist additiv.
+    const [rows, total] = await Promise.all([
+      q ? searchReceipts(userId, { query: q, ...filter }) : listReceipts(userId, filter),
+      countReceipts(userId, { ...filter, query: q }),
+    ]);
 
-    return c.json({ receipts: rows.map(toView), count: rows.length });
+    return c.json({ receipts: rows.map(toView), count: rows.length, total });
+  })
+
+  /**
+   * Anzahl und Summe je Waehrung - fuer die Kennzahl auf der Startseite.
+   *
+   * Eine eigene Abfrage und keine Hochrechnung aus einer Seite: eine Kennzahl,
+   * die nur die ersten 50 Zeilen kennt, ist schlicht falsch. Nimmt dieselben
+   * Filter wie die Liste.
+   */
+  .get('/summary', validate('query', listQuerySchema), async c => {
+    const { q, ...filter } = c.req.valid('query');
+    const byCurrency = await summarizeReceipts(subjectOf(c), { ...filter, query: q });
+    return c.json({ byCurrency });
+  })
+
+  /**
+   * Die vergebenen Kategorien, fuer das Filter-Dropdown.
+   *
+   * Steht VOR '/:id': Hono probiert die Routen in Registrierungsreihenfolge,
+   * sonst faengt der id-Parameter "categories" ab.
+   */
+  .get('/categories', async c => {
+    return c.json({ categories: await listCategories(subjectOf(c)) });
   })
 
   .get('/:id', async c => {

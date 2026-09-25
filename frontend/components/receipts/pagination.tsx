@@ -1,74 +1,51 @@
-// Serverseitige Paginierung: die Links tragen die Seitennummer in der URL, die
-// Seite laedt die naechsten Zeilen aus der Datenbank. Es werden nie alle Zeilen
-// geladen und im Browser durchgeblaettert.
+// Seitenweiter Blaetterer.
+//
+// Steht nicht in der Vorlage - die zeigt sieben Beispielzeilen. Mit echten
+// Daten ist er nicht verzichtbar: der Dienst liefert hoechstens 200 Zeilen pro
+// Aufruf (limit in api/src/routes/receipts.ts), und ein Jahr Belege sind mehr.
+// Optisch bewusst zurueckhaltend, in der Formensprache der Filterzeile.
 
 import Link from "next/link";
 import { serializeReceiptQuery, type ReceiptQuery } from "@/lib/receipts/query-params";
-import { cn } from "@/lib/utils";
 
-export function Pagination({
-  query,
-  page,
-  pageCount,
-  total,
-}: {
-  query: ReceiptQuery;
-  page: number;
-  pageCount: number;
-  total: number;
-}) {
-  const first = (page - 1) * query.pageSize + 1;
-  const last = Math.min(page * query.pageSize, total);
+const BUTTON =
+  "border-line-2 bg-panel text-ink-2 hover:bg-surface h-9 rounded-[10px] border px-3 text-[13px] flex items-center";
+const BUTTON_OFF =
+  "border-line bg-surface text-ink-3 h-9 rounded-[10px] border px-3 text-[13px] flex items-center cursor-not-allowed opacity-60";
+
+export function Pagination({ query, total }: { query: ReceiptQuery; total: number }) {
+  const pageCount = Math.max(1, Math.ceil(total / query.pageSize));
+  if (pageCount === 1) return null;
+
+  const first = (query.page - 1) * query.pageSize + 1;
+  const last = Math.min(query.page * query.pageSize, total);
+
+  const href = (page: number) => {
+    const search = serializeReceiptQuery(query, { page });
+    return search ? `/receipts?${search}` : "/receipts";
+  };
 
   return (
-    <nav
-      aria-label="Seitennavigation"
-      className="text-fg-muted flex items-center justify-between gap-4 text-[13px]"
-    >
-      <p className="tabular">
-        {first}&ndash;{last} von {total}
-      </p>
-
-      <div className="flex items-center gap-1">
-        <PageLink query={query} page={page - 1} disabled={page <= 1} label="Zurueck" />
-        <span className="tabular px-2">
-          Seite {page} / {pageCount}
-        </span>
-        <PageLink query={query} page={page + 1} disabled={page >= pageCount} label="Weiter" />
-      </div>
-    </nav>
-  );
-}
-
-function PageLink({
-  query,
-  page,
-  disabled,
-  label,
-}: {
-  query: ReceiptQuery;
-  page: number;
-  disabled: boolean;
-  label: string;
-}) {
-  const className = cn(
-    "border-line h-7 rounded-md border px-2.5 leading-[26px]",
-    disabled ? "text-fg-subtle cursor-default opacity-50" : "hover:bg-surface-2 text-fg",
-  );
-
-  // Am Rand ein <span> statt eines toten Links: ein Link ohne Ziel ist mit
-  // Tastatur erreichbar und tut nichts.
-  if (disabled) {
-    return (
-      <span aria-disabled className={className}>
-        {label}
+    <div className="flex items-center gap-[9px]">
+      <span className="text-ink-3 tabular text-[12.5px]">
+        {first}–{last} of {total}
       </span>
-    );
-  }
-
-  return (
-    <Link href={`/belege?${serializeReceiptQuery(query, { page })}`} className={className}>
-      {label}
-    </Link>
+      <div className="ml-auto flex items-center gap-[9px]">
+        {query.page > 1 ? (
+          <Link href={href(query.page - 1)} className={BUTTON}>
+            Previous
+          </Link>
+        ) : (
+          <span className={BUTTON_OFF}>Previous</span>
+        )}
+        {query.page < pageCount ? (
+          <Link href={href(query.page + 1)} className={BUTTON}>
+            Next
+          </Link>
+        ) : (
+          <span className={BUTTON_OFF}>Next</span>
+        )}
+      </div>
+    </div>
   );
 }

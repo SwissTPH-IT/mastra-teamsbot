@@ -100,7 +100,7 @@ services:
 
   frontend:
     # Kontext ist das Repo-Root, nicht ./frontend: das Frontend ist ein
-    # npm-Workspace dieses Repos und importiert das Drizzle-Schema aus src/db.
+    # npm-Workspace dieses Repos und baut gegen das Lockfile des Roots.
     build:
       context: .
       dockerfile: frontend/Dockerfile
@@ -108,15 +108,23 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Dieselbe Instanz wie der Agent, eigener kleiner Pool. Das Frontend
-      # migriert nichts - das macht der Agent-Service beim Start.
-      DATABASE_URL: postgres://mastra:mastra@postgres:5432/mastra
-      FRONTEND_DB_POOL_MAX: 3
+      # KEIN DATABASE_URL: das Frontend hat keine Datenbankverbindung mehr.
+      # Alle Belegdaten kommen ueber den API-Dienst.
+      API_URL: http://api:4000
+      API_SERVICE_TOKEN: ${API_SERVICE_TOKEN:-lokaler-test-token-mindestens-32-zeichen-lang}
       # Nur fuer die Belegbilder: die liegen im Datenverzeichnis des Agenten.
       # Servicename statt localhost, der Aufruf passiert im Container.
       MASTRA_URL: http://mastra:4111
+      # Anmeldung. Ohne diese Werte kommt man nicht ueber /signin hinaus - der
+      # Rest des Stacks laeuft trotzdem, deshalb keine Pflichtvariablen mit ":?".
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      AUTH_MICROSOFT_ENTRA_ID_ID: ${AUTH_MICROSOFT_ENTRA_ID_ID:-}
+      AUTH_MICROSOFT_ENTRA_ID_SECRET: ${AUTH_MICROSOFT_ENTRA_ID_SECRET:-}
+      AUTH_MICROSOFT_ENTRA_ID_ISSUER: ${AUTH_MICROSOFT_ENTRA_ID_ISSUER:-}
+      TEAMS_CHAT_URL: ${TEAMS_CHAT_URL:-}
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
       mastra:
         condition: service_healthy
