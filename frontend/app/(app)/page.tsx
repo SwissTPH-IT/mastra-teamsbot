@@ -21,8 +21,6 @@ import { formatAmount, formatToday, greeting } from "@/lib/receipts/format";
 import { parseReceiptQuery } from "@/lib/receipts/query-params";
 import { STATUS_STYLE, addTotals, formatTotals } from "@/lib/settlements/format";
 
-/** Die zwei Zustaende aus der Vorlage, die eine Pruefung durch Finance brauchen. */
-const PENDING_STATES = ["Approved", "Query"] as const;
 const LIVE_STATES: SettlementStatus[] = ["draft", "submitted"];
 
 export default async function HomePage() {
@@ -168,23 +166,6 @@ function SettlementTiles({ settlements }: { settlements: ApiSettlement[] }) {
             </Link>
           );
         })}
-        {PENDING_STATES.map((state) => (
-          <div
-            key={state}
-            aria-disabled="true"
-            title="Needs a review by Finance - not available yet"
-            className="border-line flex flex-col gap-[7px] border-l px-4 pt-4 pb-[14px] opacity-60"
-          >
-            <span className="text-ink-2 flex items-center gap-[6px] text-[12.5px]">
-              <span className="bg-line-2 h-[6px] w-[6px] rounded-full" />
-              {state}
-            </span>
-            <span className="tabular text-ink-3 text-[18px] font-semibold tracking-[-0.02em]">
-              –
-            </span>
-            <span className="text-ink-3 text-[11.5px]">not yet available</span>
-          </div>
-        ))}
       </div>
     </div>
   );
