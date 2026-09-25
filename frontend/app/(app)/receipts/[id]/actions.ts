@@ -1,6 +1,7 @@
 "use server";
 
-// Die einzige schreibende Stelle der Oberflaeche.
+// Die Korrektur eines Belegs. (Die Zuordnung zu Abrechnungen schreibt
+// app/(app)/settlements/actions.ts.)
 //
 // Kategorie und Belegart sind die beiden Felder, die der Extraktions-Agent
 // bewusst leer laesst ("Categorizing expenses is not your job") - sie muessen
@@ -15,7 +16,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { patchReceipt } from "@/lib/api/receipts";
-import { isAuthError, isNotFound, isUnlinkedAccount } from "@/lib/api/client";
+import { ApiError, isAuthError, isNotFound, isUnlinkedAccount } from "@/lib/api/client";
 
 export type SaveState = { ok: true } | { ok: false; message: string } | null;
 
@@ -45,6 +46,9 @@ export async function saveCorrections(_previous: SaveState, form: FormData): Pro
     if (isNotFound(error)) return { ok: false, message: "This receipt no longer exists." };
     if (isUnlinkedAccount(error)) {
       return { ok: false, message: "This account is not linked to any receipts." };
+    }
+    if (error instanceof ApiError && error.code === "locked") {
+      return { ok: false, message: "This receipt is in a submitted settlement and is locked." };
     }
     console.error("[frontend] Korrektur fehlgeschlagen:", error);
     return { ok: false, message: "Could not save — the receipt service did not accept it." };

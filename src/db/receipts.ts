@@ -5,10 +5,68 @@
 // an jedes WHERE. Es gibt bewusst keine Variante ohne – der Typ erzwingt sie.
 // Eine fremde receiptId trifft dadurch 0 Zeilen statt einer fremden Zeile.
 
-import { and, eq, gte, ilike, isNotNull, lte, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  eq,
+  getTableColumns,
+  gte,
+  ilike,
+  isNotNull,
+  isNull,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import { db } from './index';
-import { pendingReviews, receipts, type PendingReviewRow, type ReceiptRow } from './schema';
+import {
+  pendingReviews,
+  receipts,
+  settlements,
+  type PendingReviewRow,
+  type ReceiptRow,
+  type SettlementStatus,
+} from './schema';
 import { computeConfidence, type ReceiptCandidate } from '../mastra/receipts/candidate';
+
+/**
+ * Ein Beleg samt der Abrechnung, in der er liegt.
+ *
+ * Titel und Status kommen per Join mit, weil jede Ansicht eines Belegs sie
+ * braucht ("in Field visit Bern", gesperrt oder nicht) – ein zweiter Aufruf
+ * pro Zeile waere bei 200 Zeilen 200 Aufrufe.
+ */
+export type ReceiptWithSettlement = ReceiptRow & {
+  settlementTitle: string | null;
+  settlementStatus: SettlementStatus | null;
+};
+
+/**
+ * Wahr, solange der Beleg veraenderbar ist: ohne Abrechnung oder in einem
+ * Entwurf.
+ *
+ * Eine eingereichte Abrechnung ist gesperrt – ihre Belege aendern sich nicht
+ * mehr, weder ueber die Oberflaeche noch ueber den Agenten noch ueber einen
+ * erneuten Upload derselben Datei. Die Bedingung steht deshalb im WHERE der
+ * schreibenden Queries und nicht als Vorabpruefung: zwischen Pruefen und
+ * Schreiben koennte sonst jemand einreichen.
+ */
+export function receiptIsEditable(): SQL {
+  return sql`(${receipts.settlementId} is null or exists (
+    select 1 from ${settlements}
+    where ${settlements.id} = ${receipts.settlementId}
+      and ${settlements.userId} = ${receipts.userId}
+      and ${settlements.status} = 'draft'
+  ))`;
+}
+
+/** Ein Beleg, der wegen einer eingereichten Abrechnung nicht geschrieben wurde. */
+export class ReceiptLockedError extends Error {
+  constructor() {
+    super('Der Beleg liegt in einer eingereichten Abrechnung und kann nicht mehr geändert werden.');
+    this.name = 'ReceiptLockedError';
+  }
+}
 
 export type SaveReceiptInput = {
   candidate: ReceiptCandidate;
@@ -51,6 +109,11 @@ function toRowValues(input: SaveReceiptInput) {
  * Läuft gegen den Idempotenz-Key (user_id, file_hash): ein doppelt hochgeladener
  * Beleg oder ein wiederholter Tool-Call aktualisiert dieselbe Zeile, statt eine
  * zweite anzulegen.
+ *
+ * Liegt die bestehende Zeile in einer eingereichten Abrechnung, greift das
+ * `setWhere` nicht, es kommt keine Zeile zurück, und die Funktion wirft
+ * ReceiptLockedError. Ein erneut geschicktes Foto darf einen eingereichten
+ * Beleg nicht stillschweigend überschreiben.
  */
 export async function saveReceipt(userId: string, input: SaveReceiptInput): Promise<ReceiptRow> {
   const values = toRowValues(input);
@@ -61,9 +124,11 @@ export async function saveReceipt(userId: string, input: SaveReceiptInput): Prom
     .onConflictDoUpdate({
       target: [receipts.userId, receipts.fileHash],
       set: { ...values, updatedAt: sql`now()` },
+      setWhere: receiptIsEditable(),
     })
     .returning();
 
+  if (!row) throw new ReceiptLockedError();
   return row;
 }
 
@@ -90,6 +155,8 @@ export type ListReceiptsFilter = {
   to?: string;
   /** Exakte Kategorie. Leerstring heisst "kein Filter", nicht "Kategorie leer". */
   category?: string;
+  /** Nur Belege ohne Abrechnung. */
+  unassigned?: boolean;
   sort?: ReceiptSortField;
   dir?: 'asc' | 'desc';
 };
@@ -135,6 +202,7 @@ function buildConditions(userId: string, filter: Partial<SearchReceiptsFilter>):
   if (filter.category) conditions.push(eq(receipts.category, filter.category));
   if (filter.minAmount) conditions.push(gte(receipts.totalAmount, filter.minAmount));
   if (filter.maxAmount) conditions.push(lte(receipts.totalAmount, filter.maxAmount));
+  if (filter.unassigned) conditions.push(isNull(receipts.settlementId));
 
   return conditions;
 }
@@ -158,16 +226,35 @@ function buildOrderBy(filter: ListReceiptsFilter): SQL[] {
   ];
 }
 
+/**
+ * SELECT mit Abrechnungstitel und -status.
+ *
+ * Der Join laeuft ueber (id, user_id), wie der Fremdschluessel. Ueber id allein
+ * waere er heute genauso richtig – die Datenbank laesst nichts anderes zu –,
+ * aber eine Query soll nicht davon abhaengen, dass ein Constraint existiert.
+ */
+function selectWithSettlement() {
+  return db
+    .select({
+      ...getTableColumns(receipts),
+      settlementTitle: settlements.title,
+      settlementStatus: settlements.status,
+    })
+    .from(receipts)
+    .leftJoin(
+      settlements,
+      and(eq(settlements.id, receipts.settlementId), eq(settlements.userId, receipts.userId)),
+    );
+}
+
 async function selectPage(
   userId: string,
   filter: Partial<SearchReceiptsFilter>,
-): Promise<ReceiptRow[]> {
+): Promise<ReceiptWithSettlement[]> {
   const limit = Math.min(Math.max(filter.limit ?? 10, 1), MAX_LIMIT);
   const offset = Math.max(filter.offset ?? 0, 0);
 
-  return db
-    .select()
-    .from(receipts)
+  return selectWithSettlement()
     .where(and(...buildConditions(userId, filter)))
     .orderBy(...buildOrderBy(filter))
     .limit(limit)
@@ -178,7 +265,7 @@ async function selectPage(
 export async function listReceipts(
   userId: string,
   filter: ListReceiptsFilter = {},
-): Promise<ReceiptRow[]> {
+): Promise<ReceiptWithSettlement[]> {
   return selectPage(userId, filter);
 }
 
@@ -186,7 +273,7 @@ export async function listReceipts(
 export async function searchReceipts(
   userId: string,
   filter: SearchReceiptsFilter,
-): Promise<ReceiptRow[]> {
+): Promise<ReceiptWithSettlement[]> {
   return selectPage(userId, filter);
 }
 
@@ -276,28 +363,38 @@ export type ReceiptPatch = Partial<
  * Das `eq(receipts.userId, userId)` im WHERE ist nicht optional: ohne es könnte
  * ein Nutzer über eine erratene id einen fremden Beleg ändern. Mit ihm trifft
  * die Query 0 Zeilen und die Funktion gibt null zurück.
+ *
+ * Ein Beleg in einer eingereichten Abrechnung trifft ebenfalls 0 Zeilen; die
+ * Funktion unterscheidet das danach und wirft ReceiptLockedError, damit der
+ * Aufrufer "gesperrt" und "gibt es nicht" auseinanderhalten kann.
  */
 export async function updateReceipt(
   userId: string,
   receiptId: string,
   patch: ReceiptPatch,
-): Promise<ReceiptRow | null> {
+): Promise<ReceiptWithSettlement | null> {
   const fields = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
   if (Object.keys(fields).length === 0) return getReceipt(userId, receiptId);
 
   const [row] = await db
     .update(receipts)
     .set({ ...fields, updatedAt: sql`now()` })
-    .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
-    .returning();
+    .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId), receiptIsEditable()))
+    .returning({ id: receipts.id });
 
-  return row ?? null;
+  if (!row) {
+    const existing = await getReceipt(userId, receiptId);
+    if (existing) throw new ReceiptLockedError();
+    return null;
+  }
+  return getReceipt(userId, receiptId);
 }
 
-export async function getReceipt(userId: string, receiptId: string): Promise<ReceiptRow | null> {
-  const [row] = await db
-    .select()
-    .from(receipts)
+export async function getReceipt(
+  userId: string,
+  receiptId: string,
+): Promise<ReceiptWithSettlement | null> {
+  const [row] = await selectWithSettlement()
     .where(and(eq(receipts.id, receiptId), eq(receipts.userId, userId)))
     .limit(1);
 

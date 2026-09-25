@@ -13,7 +13,7 @@ import { saveCorrections, type SaveState } from "@/app/(app)/receipts/[id]/actio
 import { CATEGORIES, RECEIPT_TYPES } from "@/lib/receipts/categories";
 
 const SELECT_CLASS =
-  "border-line-2 bg-panel text-ink h-11 w-full cursor-pointer appearance-none rounded-[11px] border pr-[34px] pl-3 text-sm";
+  "border-line-2 bg-panel text-ink disabled:bg-surface disabled:text-ink-3 h-11 w-full cursor-pointer appearance-none rounded-[11px] border pr-[34px] pl-3 text-sm disabled:cursor-not-allowed";
 
 const CHEVRON = {
   backgroundImage:
@@ -45,13 +45,17 @@ export function CorrectionForm({
   receiptId,
   category,
   receiptType,
-  /** Ausgegraut, solange es keine Abrechnungen gibt. */
-  assignmentNote,
+  lockedReason,
 }: {
   receiptId: string;
   category: string | null;
   receiptType: string | null;
-  assignmentNote: string;
+  /**
+   * Gesetzt, wenn der Beleg in einer eingereichten Abrechnung liegt. Dann ist
+   * das Formular nur noch Anzeige - der Dienst wuerde die Korrektur ohnehin
+   * mit 409 ablehnen, aber ein Knopf, der garantiert scheitert, ist keiner.
+   */
+  lockedReason?: string;
 }) {
   const [state, action] = useActionState<SaveState, FormData>(saveCorrections, null);
 
@@ -63,6 +67,7 @@ export function CorrectionForm({
         <Field label="Category" hint="Left empty by the agent on purpose">
           <select
             name="category"
+            disabled={!!lockedReason}
             defaultValue={category ?? ""}
             className={SELECT_CLASS}
             style={CHEVRON}
@@ -78,6 +83,7 @@ export function CorrectionForm({
         <Field label="Receipt type" hint="Required before submitting">
           <select
             name="receiptType"
+            disabled={!!lockedReason}
             defaultValue={receiptType ?? ""}
             className={SELECT_CLASS}
             style={CHEVRON}
@@ -92,17 +98,13 @@ export function CorrectionForm({
       </div>
 
       <div className="border-line flex items-center gap-[9px] border-t pt-5">
-        <SubmitButton />
-        <button
-          type="button"
-          disabled
-          title="Settlements are not available yet"
-          className="bg-surface text-ink-3 h-10 cursor-not-allowed rounded-[10px] px-[14px] text-[13.5px]"
-        >
-          Assign to settlement
-        </button>
+        <SubmitButton disabled={!!lockedReason} />
         <span className="text-ink-3 ml-auto text-xs">
-          {state?.ok === true ? "Saved" : state?.ok === false ? state.message : assignmentNote}
+          {state?.ok === true
+            ? "Saved"
+            : state?.ok === false
+              ? state.message
+              : (lockedReason ?? "")}
         </span>
       </div>
     </form>
@@ -115,14 +117,14 @@ export function CorrectionForm({
  * Eigene Komponente, weil useFormStatus nur INNERHALB des Formulars den
  * Wartezustand kennt - im Elternteil ist er immer false.
  */
-function SubmitButton() {
+function SubmitButton({ disabled }: { disabled: boolean }) {
   const { pending } = useFormStatus();
 
   return (
     <button
       type="submit"
-      disabled={pending}
-      className="bg-brand hover:bg-brand-deep h-10 rounded-[10px] px-4 text-[13.5px] font-medium text-white disabled:opacity-70"
+      disabled={pending || disabled}
+      className="bg-brand hover:bg-brand-deep h-10 rounded-[10px] px-4 text-[13.5px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-70"
     >
       {pending ? "Saving…" : "Save corrections"}
     </button>

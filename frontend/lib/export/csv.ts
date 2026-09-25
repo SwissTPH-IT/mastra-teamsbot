@@ -71,6 +71,7 @@ const COLUMNS: Column[] = [
   { header: "Currency", value: (row) => row.currency },
   { header: "Confidence", value: (row, o) => decimal(row.confidence, o) },
   { header: "Issues", value: (row) => (row.issues.length > 0 ? row.issues.join("; ") : null) },
+  { header: "Settlement", value: (row) => row.settlement?.title ?? null },
   { header: "Captured at", value: (row) => formatTimestamp(row.createdAt) },
   { header: "File reference", value: (row) => row.fileReference },
 ];

@@ -12,13 +12,19 @@ import { useRouter } from "next/navigation";
 import { PERIODS, serializeReceiptQuery, type ReceiptQuery } from "@/lib/receipts/query-params";
 
 /**
- * Die drei Umschalter, die noch nichts filtern koennen.
+ * Die zwei Umschalter, die noch nichts filtern koennen.
  *
- * "Unassigned only" braucht Abrechnungen, "With/Without receipt" braucht
- * selbst eingetragene Belege - beides gibt es nicht. Sie stehen hier, weil die
- * Vorlage sie vorsieht und ihr Platz in der Zeile sonst zweimal wandert.
+ * "With/Without receipt" braucht selbst eingetragene Belege, und die gibt es
+ * nicht. Sie stehen hier, weil die Vorlage sie vorsieht und ihr Platz in der
+ * Zeile sonst zweimal wandert.
  */
-const PENDING_TOGGLES = ["Unassigned only", "With receipt", "Without receipt"] as const;
+const PENDING_TOGGLES = ["With receipt", "Without receipt"] as const;
+
+/** Die Pille aus der Vorlage (pill(on)): gefuellt, wenn aktiv. */
+const TOGGLE_CLASS = {
+  on: "border-brand bg-brand-soft text-brand-deep h-9 rounded-[10px] border px-[13px] text-[13px] font-medium",
+  off: "border-line-2 bg-panel text-ink-2 hover:bg-surface h-9 rounded-[10px] border px-[13px] text-[13px]",
+} as const;
 
 const SELECT_CLASS =
   "border-line-2 bg-panel text-ink h-9 cursor-pointer appearance-none rounded-[10px] border pr-[34px] pl-[10px] text-[13px]";
@@ -81,12 +87,21 @@ export function FilterBar({
         ))}
       </select>
 
+      <button
+        type="button"
+        aria-pressed={query.unassigned}
+        onClick={() => go({ unassigned: !query.unassigned })}
+        className={query.unassigned ? TOGGLE_CLASS.on : TOGGLE_CLASS.off}
+      >
+        Unassigned only
+      </button>
+
       {PENDING_TOGGLES.map((label) => (
         <button
           key={label}
           type="button"
           disabled
-          title="Not available yet - needs settlements and self-entered expenses"
+          title="Not available yet - needs self-entered expenses"
           className="border-line bg-surface text-ink-3 h-9 cursor-not-allowed rounded-[10px] border px-[13px] text-[13px] opacity-60"
         >
           {label}

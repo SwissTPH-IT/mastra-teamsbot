@@ -1,8 +1,8 @@
 # Spesen – Weboberfläche
 
 Die Selbstverwaltung der eigenen Belege: ansehen, prüfen, Kategorie und Belegart
-korrigieren, als CSV exportieren. Nach dem Login sieht **jeder nur seine
-eigenen** Belege.
+korrigieren, zu Abrechnungen bündeln und einreichen, als CSV exportieren. Nach
+dem Login sieht **jeder nur seine eigenen** Belege und Abrechnungen.
 
 Erfasst wird hier nichts. Belege kommen über Microsoft Teams herein, der
 Human-in-the-Loop-Flow des Agenten legt sie dem Nutzer vor, und erst nach seiner
@@ -10,8 +10,9 @@ Bestätigung entsteht eine Zeile in `app.receipts`. Diese Oberfläche ist die Si
 darauf.
 
 Grundlage ist das Mockup „Swiss TPH Expenses" (`dev/Swiss TPH Expenses.html`).
-Umgesetzt ist daraus der Belegteil; die Abrechnungen sind im Entwurf enthalten
-und hier **sichtbar ausgegraut** (siehe „Was ausgegraut ist und warum").
+Umgesetzt sind der Belegteil und die Abrechnungen mit den Zuständen Draft und
+Submitted. Approved und Query brauchen eine Prüfung durch Finance, die es nicht
+gibt; sie sind **sichtbar ausgegraut** (siehe „Was ausgegraut ist und warum").
 
 ## Variante A: die Oberfläche spricht nur mit der API
 
@@ -51,8 +52,8 @@ gibt bewusst keine Funktion, die ein Subject als Argument nimmt.
 
 Ein eigenes Zugriffstoken für die API (On-Behalf-Of) wäre die strengere Variante
 und braucht eine zweite App-Registrierung in Entra („expose an API" plus Scope).
-Sie ist nicht angelegt, und solange die Oberfläche nur die eigenen Belege liest
-und nur Kategorie und Belegart schreibt, braucht es sie nicht. Der Weg dorthin
+Sie ist nicht angelegt, und solange die Oberfläche nur die eigenen Belege und
+Abrechnungen liest und schreibt, braucht es sie nicht. Der Weg dorthin
 ist kurz: `auth.ts` fordert den Scope an, und `client.ts` schickt das Nutzertoken
 statt des Service-Tokens – der Dienst kann beides schon (`api/src/auth.ts`).
 
@@ -88,9 +89,11 @@ app/
   signin/page.tsx             Anmeldeseite (ein Knopf)
   (app)/layout.tsx            Seitenleiste + Inhalt, verlangt eine Session
   (app)/page.tsx              Startseite: Kennzahl, Abrechnungskacheln, letzte Belege
-  (app)/receipts/page.tsx     Liste: Filterleiste, Tabelle, Blätterer
-  (app)/receipts/[id]/        Detail: Bild, Prüfhinweis, Felder, Korrektur
-  (app)/settlements/page.tsx  Platzhalter, noch nicht gebaut
+  (app)/receipts/page.tsx     Liste: Filterleiste, Tabelle, Auswahl, Blätterer
+  (app)/receipts/[id]/        Detail: Bild, Prüfhinweis, Felder, Korrektur, Zuordnung
+  (app)/settlements/page.tsx  Abrechnungen: Liste, „New settlement"
+  (app)/settlements/[id]/     Abrechnung: Positionen, Summen je Kategorie, Submit
+  (app)/settlements/actions.ts  Server Actions: zuordnen, entfernen, einreichen, löschen
   api/auth/[...nextauth]/     Anmeldevorgang
   api/export/route.ts         CSV, serverseitig gestreamt
   api/healthz/route.ts        Health-Check (ohne Login), siehe unten
@@ -98,6 +101,8 @@ app/
 lib/
   api/client.ts               Der EINE Weg zu den Daten (server-only)
   api/receipts.ts             Typisierte Aufrufe + der Vertrag mit dem Dienst
+  api/settlements.ts          Dasselbe für die Abrechnungen
+  settlements/format.ts       Status, Zeitraum, Summen je Währung (in Rappen addiert)
   api/stream.ts               Alle Treffer seitenweise, für den Export
   api/guard.ts                Aus einem Fehler des Dienstes wird ein Zustand der UI
   receipts/query-params.ts    URL <-> Abfrage
@@ -108,6 +113,7 @@ lib/
 components/
   shell/sidebar.tsx           Navigation, Nutzerblock, Abmelden
   receipts/                   Zeilen, Filterleiste, Blätterer, Zustände, Formular
+  settlements/                Auswahl + Leiste, Zuordnungsdialog, Action-Knöpfe
 ```
 
 Der Zustand der Ansicht steht vollständig in den **Query-Parametern** und
@@ -143,8 +149,22 @@ gehört, ohne es anklicken zu können.
   Stattdessen steht dort ein Satz, damit nicht gesucht wird, was es nicht gibt.
 - **Abmelden statt Einstellungen** in der Seitenleiste: Einstellungen gibt es
   nicht, einen Weg aus der Anmeldung braucht es.
-- **Keine Mehrfachauswahl** in der Liste. Ihre einzige Aktion im Entwurf ist
-  „Add to settlement".
+- **Abrechnungen: zwei Zustände statt vier.** Kein „Query"-Banner, kein
+  „Resubmit", kein „Open flagged item" – das alles hängt an einer Rückfrage von
+  Finance. Zurück in den Entwurf geht eine eingereichte Abrechnung heute nur per
+  SQL.
+- **Summen je Währung.** Der Entwurf zeigt überall „… CHF". Liegt ein EUR-Beleg
+  in der Abrechnung oder der Auswahl, steht er als eigener Posten daneben
+  („192.85 CHF + 12.50 EUR") – addiert wird nicht, einen Kurs gibt es nicht.
+- **Kein Zeitraum als Eingabe.** Der Zeitraum einer Abrechnung ist das früheste
+  bis späteste Belegdatum ihrer Positionen, gerechnet und nicht gespeichert.
+- **Submit verlangt die Belegart** an jedem Beleg („Required before
+  submitting" steht im Entwurf am Feld). Der Dienst prüft es, die Seite markiert
+  die Positionen mit „Type missing".
+- **Kein „Download Excel" / PDF** an der eingereichten Abrechnung. Der CSV-Export
+  der Belegliste hat dafür eine Spalte „Settlement".
+- **Die Auswahl gilt pro Seite.** Blättern oder Filtern leert sie – eine
+  Auswahl, die man nicht mehr sieht, wäre eine Fehlerquelle.
 - **Nur Hell.** Der Entwurf definiert `color-scheme: light` und kein dunkles
   Gegenstück; einen selbst erfundenen Dunkelmodus hätte niemand entschieden.
 - **Sprache.** Die Oberflächentexte sind englisch, 1:1 aus dem Entwurf – anders
@@ -223,8 +243,7 @@ sonst als Selbsteinschätzung gelesen wird.
 
 ## Korrigieren
 
-Schreibend ist genau eine Stelle: Kategorie und Belegart auf der Detailseite
-(`PATCH /receipts/:id`). Das sind die beiden Felder, die der Extraktions-Agent
+Kategorie und Belegart auf der Detailseite (`PATCH /receipts/:id`). Das sind die beiden Felder, die der Extraktions-Agent
 bewusst leer lässt – sie müssen von Hand gesetzt werden können.
 
 Betrag, Datum und Währung bleiben dem Teams-Dialog vorbehalten: dort liegt das
@@ -234,6 +253,34 @@ Leerstring.
 
 Das Formular ist ein echtes `<form>` mit einer Server Action und funktioniert
 ohne JavaScript.
+
+Liegt der Beleg in einer eingereichten Abrechnung, ist das Formular gesperrt.
+Die Sperre selbst sitzt im Dienst (409 mit `code: "locked"`); die Seite zeigt sie
+nur an.
+
+## Abrechnungen
+
+Eine Abrechnung bündelt Belege und wird als Ganzes eingereicht. Ein Beleg liegt
+in höchstens einer. Zugeordnet wird aus der Liste (Checkboxen, Leiste unten,
+„Add to settlement") oder von der Detailseite des Belegs; im Dialog lässt sich
+auch gleich eine neue Abrechnung anlegen – Anlegen und Zuordnen passieren im
+Dienst in einer Transaktion.
+
+Alle Regeln entscheidet der Dienst (`src/db/settlements.ts`), im selben
+Statement, in dem er schreibt:
+
+- Zuordnen ist **alles oder nichts**: ist ein Beleg nicht zuzuordnen (fremd,
+  gesperrt), wird keiner zugeordnet.
+- Zwischen Entwürfen dürfen Belege wandern, aus einer eingereichten Abrechnung
+  heraus nicht.
+- **Submit** geht nur mit mindestens einem Beleg und mit Belegart an jedem.
+  Danach ist die Abrechnung gesperrt: keine Positionen hinzu oder weg, keine
+  Korrekturen, kein neuer Titel, kein Löschen.
+- Einen Entwurf zu löschen lässt die Belege stehen; sie sind danach wieder frei.
+
+Fehler kommen mit einem `code` (`locked`, `receipts-unavailable`, `empty`,
+`incomplete`) zurück, aus dem `app/(app)/settlements/actions.ts` den englischen
+Satz macht – der deutsche Text des Dienstes geht ins Server-Log.
 
 ## CSV-Export
 

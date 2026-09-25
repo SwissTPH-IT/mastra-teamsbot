@@ -14,10 +14,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CorrectionForm } from "@/components/receipts/correction-form";
 import { ReceiptImage } from "@/components/receipts/receipt-image";
+import { lockedReason } from "@/components/receipts/rows";
+import { ActionButton } from "@/components/settlements/action-button";
+import { AssignDialog } from "@/components/settlements/assign-dialog";
+import { removeFromSettlement } from "@/app/(app)/settlements/actions";
 import { ServiceUnavailable, UnlinkedAccount } from "@/components/receipts/states";
 import { classifyFailure } from "@/lib/api/guard";
 import { isNotFound } from "@/lib/api/client";
 import { fetchReceipt, type ApiReceipt } from "@/lib/api/receipts";
+import { fetchSettlements, type ApiSettlement } from "@/lib/api/settlements";
 import { receiptTypeLabel } from "@/lib/receipts/categories";
 import {
   formatAmount,
@@ -32,8 +37,9 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
   const { id } = await params;
 
   let receipt: ApiReceipt;
+  let drafts: ApiSettlement[];
   try {
-    receipt = await fetchReceipt(id);
+    [receipt, drafts] = await Promise.all([fetchReceipt(id), fetchSettlements("draft")]);
   } catch (error) {
     // 404 ist hier eine Seite und kein Zustand: eine geratene oder fremde id
     // sieht genauso aus wie eine geloeschte. Das ist gewollt - sie soll nicht
@@ -105,12 +111,72 @@ export default async function ReceiptDetailPage({ params }: { params: Promise<{ 
             receiptId={receipt.id}
             category={receipt.category}
             receiptType={receipt.receiptType}
-            assignmentNote="Not in a settlement yet"
+            lockedReason={lockedReason(receipt)}
+          />
+
+          {/* Ausserhalb des Korrekturformulars: der Dialog hat ein eigenes
+              <form>, und Formulare lassen sich nicht verschachteln. */}
+          <Assignment
+            receipt={receipt}
+            drafts={drafts.filter((draft) => draft.id !== receipt.settlement?.id)}
           />
 
           <ExtractedFields receipt={receipt} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Wo der Beleg liegt, und der Weg hinein, hinaus oder hinueber.
+ *
+ * Verschieben in einen anderen Entwurf geht ueber denselben Dialog: der
+ * Dienst erlaubt das Wandern zwischen Entwuerfen, nur aus einer eingereichten
+ * Abrechnung heraus nicht.
+ */
+function Assignment({ receipt, drafts }: { receipt: ApiReceipt; drafts: ApiSettlement[] }) {
+  const settlement = receipt.settlement;
+  const locked = settlement?.status === "submitted";
+  const title = receiptTitle(receipt).text;
+
+  return (
+    <div className="border-line flex items-center gap-[9px] rounded-xl border px-4 py-3">
+      <div className="min-w-0 flex-1 text-[13px]">
+        {settlement ? (
+          <>
+            <span className="text-ink-3">In settlement </span>
+            <Link href={`/settlements/${settlement.id}`} className="text-brand font-medium">
+              {settlement.title}
+            </Link>
+            <span className="text-ink-3">{locked ? " · submitted, locked" : " · draft"}</span>
+          </>
+        ) : (
+          <span className="text-ink-3">Not in a settlement yet</span>
+        )}
+      </div>
+
+      {settlement && !locked ? (
+        <ActionButton
+          action={removeFromSettlement}
+          fields={{ settlementId: settlement.id, receiptId: receipt.id }}
+          label="Remove"
+          pendingLabel="Removing…"
+          className="text-ink-2 hover:bg-surface h-9 rounded-[10px] px-3 text-[13px]"
+        />
+      ) : null}
+
+      {/* Aus einer eingereichten Abrechnung fuehrt kein Weg heraus - also
+          auch kein Knopf, der so aussieht. */}
+      {locked ? null : (
+        <AssignDialog
+          receiptIds={[receipt.id]}
+          settlements={drafts}
+          subtitle={title}
+          trigger={settlement ? "Move to settlement" : "Assign to settlement"}
+          triggerClassName="border-line-2 bg-panel text-ink-2 hover:bg-surface h-9 rounded-[10px] border px-[14px] text-[13px]"
+        />
+      )}
     </div>
   );
 }

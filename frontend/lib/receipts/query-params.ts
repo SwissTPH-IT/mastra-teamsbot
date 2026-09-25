@@ -32,6 +32,8 @@ export type ReceiptQuery = {
   period: Period;
   /** Exakte Kategorie. Leer heisst "alle", nicht "ohne Kategorie". */
   category: string;
+  /** Nur Belege, die in keiner Abrechnung liegen. In der URL als `unassigned=1`. */
+  unassigned: boolean;
   sort: SortField;
   dir: SortDirection;
   page: number;
@@ -50,6 +52,7 @@ export const QUERY_PARAM_KEYS = [
   "q",
   "period",
   "category",
+  "unassigned",
   "sort",
   "dir",
   "page",
@@ -102,6 +105,7 @@ export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
     q: readOne(input, "q") ?? "",
     period,
     category: readOne(input, "category") ?? "",
+    unassigned: readOne(input, "unassigned") === "1",
     sort,
     dir: readOne(input, "dir") === "asc" ? "asc" : "desc",
     page,
@@ -136,7 +140,7 @@ export function serializeReceiptQuery(
   overrides: Partial<ReceiptQuery> = {},
 ): string {
   const resetsPage = Object.keys(overrides).some((key) =>
-    ["q", "period", "category", "pageSize", "sort", "dir"].includes(key),
+    ["q", "period", "category", "unassigned", "pageSize", "sort", "dir"].includes(key),
   );
   const merged = { ...query, ...overrides, ...(resetsPage ? { page: 1 } : {}) };
   const params = new URLSearchParams();
@@ -144,6 +148,7 @@ export function serializeReceiptQuery(
   if (merged.q) params.set("q", merged.q);
   if (merged.period !== DEFAULT_PERIOD) params.set("period", merged.period);
   if (merged.category) params.set("category", merged.category);
+  if (merged.unassigned) params.set("unassigned", "1");
   if (merged.sort !== "receiptDate") params.set("sort", merged.sort);
   if (merged.dir !== "desc") params.set("dir", merged.dir);
   if (merged.pageSize !== DEFAULT_PAGE_SIZE) params.set("pageSize", String(merged.pageSize));
@@ -154,5 +159,7 @@ export function serializeReceiptQuery(
 
 /** True, wenn ueberhaupt ein Filter gesetzt ist - unterscheidet die Empty States. */
 export function hasActiveFilter(query: ReceiptQuery): boolean {
-  return query.q !== "" || query.category !== "" || query.period !== DEFAULT_PERIOD;
+  return (
+    query.q !== "" || query.category !== "" || query.unassigned || query.period !== DEFAULT_PERIOD
+  );
 }

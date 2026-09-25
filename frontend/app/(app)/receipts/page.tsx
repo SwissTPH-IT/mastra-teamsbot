@@ -8,6 +8,7 @@
 import { Suspense } from "react";
 import { FilterBar } from "@/components/receipts/filter-bar";
 import { Pagination } from "@/components/receipts/pagination";
+import { SelectionBar, SelectionProvider } from "@/components/settlements/selection";
 import { ReceiptRow, ReceiptTableHeader } from "@/components/receipts/rows";
 import {
   NoMatches,
@@ -16,7 +17,8 @@ import {
   UnlinkedAccount,
 } from "@/components/receipts/states";
 import { classifyFailure } from "@/lib/api/guard";
-import { fetchCategories, fetchReceiptPage } from "@/lib/api/receipts";
+import { fetchCategories, fetchReceiptPage, fetchSummary } from "@/lib/api/receipts";
+import { fetchSettlements, type ApiSettlement } from "@/lib/api/settlements";
 import {
   hasActiveFilter,
   parseReceiptQuery,
@@ -49,10 +51,24 @@ export default async function ReceiptsPage({
 async function List({ query }: { query: ReceiptQuery }) {
   let page;
   let categories: string[] = [];
+  let drafts: ApiSettlement[] = [];
+  let unassigned = 0;
 
   try {
-    // Parallel: die Kategorien des Dropdowns haengen nicht an der Seite.
-    [page, categories] = await Promise.all([fetchReceiptPage(query), fetchCategories()]);
+    // Parallel: Kategorien, offene Entwuerfe (fuer "Add to settlement") und
+    // die Zahl der freien Belege haengen nicht an der Seite. Die freien unter
+    // denselben Filtern wie die Tabelle - sonst stuende "12 unassigned" neben
+    // einer Liste, die nur 3 davon zeigt.
+    const [pageResult, categoryList, draftList, free] = await Promise.all([
+      fetchReceiptPage(query),
+      fetchCategories(),
+      fetchSettlements("draft"),
+      fetchSummary({ ...query, unassigned: true }),
+    ]);
+    page = pageResult;
+    categories = categoryList;
+    drafts = draftList;
+    unassigned = free.reduce((sum, entry) => sum + entry.count, 0);
   } catch (error) {
     const failure = classifyFailure(error);
     return (
@@ -73,10 +89,10 @@ async function List({ query }: { query: ReceiptQuery }) {
       ? filtered
         ? "No items match"
         : "No items yet"
-      : `${page.count} of ${page.total} items · ${page.total} unassigned`;
+      : `${page.count} of ${page.total} items · ${unassigned} unassigned`;
 
   return (
-    <>
+    <SelectionProvider>
       <Header summary={summary} query={query} />
       <FilterBar query={query} categories={categories} filtersActive={filtered} />
 
@@ -85,7 +101,7 @@ async function List({ query }: { query: ReceiptQuery }) {
       ) : (
         <>
           <div className="border-line bg-panel overflow-hidden rounded-xl border">
-            <ReceiptTableHeader />
+            <ReceiptTableHeader receipts={page.receipts} />
             {page.receipts.map((receipt) => (
               <ReceiptRow key={receipt.id} receipt={receipt} />
             ))}
@@ -94,7 +110,9 @@ async function List({ query }: { query: ReceiptQuery }) {
           <Pagination query={query} total={page.total} />
         </>
       )}
-    </>
+
+      <SelectionBar settlements={drafts} />
+    </SelectionProvider>
   );
 }
 

@@ -22,16 +22,19 @@ import {
   searchReceipts,
   updateReceipt,
   type ReceiptPatch,
+  type ReceiptWithSettlement,
 } from 'mastra-teamsbot/db/receipts';
-import type { ReceiptRow } from 'mastra-teamsbot/db/schema';
 import { candidateSchema } from 'mastra-teamsbot/receipts/candidate';
 import { subjectOf, type AuthState } from '../auth';
 import { validate } from '../validate';
 
 type Env = { Variables: { auth: AuthState } };
 
-/** Die Projektion. Identisch zu dem, was die Tools heute zurueckgeben. */
-function toView(row: ReceiptRow) {
+/**
+ * Die Projektion. Identisch zu dem, was die Tools heute zurueckgeben, plus die
+ * Abrechnung, in der der Beleg liegt (null = unassigned).
+ */
+export function toView(row: ReceiptWithSettlement) {
   return {
     id: row.id,
     merchant: row.merchant,
@@ -59,6 +62,10 @@ function toView(row: ReceiptRow) {
      */
     lineItemCount: Array.isArray(row.lineItems) ? row.lineItems.length : 0,
     fileReference: row.fileReference,
+    settlement:
+      row.settlementId && row.settlementStatus
+        ? { id: row.settlementId, title: row.settlementTitle, status: row.settlementStatus }
+        : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -71,6 +78,11 @@ const listQuerySchema = z.object({
   from: isoDate.optional(),
   to: isoDate.optional(),
   category: z.string().min(1).optional(),
+  /** "true" = nur Belege ohne Abrechnung. Query-Parameter sind Strings, kein z.coerce.boolean: das macht aus "false" true. */
+  unassigned: z
+    .enum(['true', 'false'])
+    .transform(value => value === 'true')
+    .optional(),
   minAmount: z.string().optional(),
   maxAmount: z.string().optional(),
   /**
@@ -131,14 +143,18 @@ export const receiptRoutes = new Hono<Env>()
     const userId = subjectOf(c);
     const body = c.req.valid('json');
 
-    const row = await saveReceipt(userId, {
+    const saved = await saveReceipt(userId, {
       candidate: body.candidate,
       fileHash: body.fileHash,
       fileReference: body.fileReference,
       rawExtraction: body.rawExtraction ?? body.candidate,
     });
+    // Mit Abrechnung zurueck, wie jede andere Antwort dieses Dienstes. Ein
+    // wiederholter Upload kann einen Beleg treffen, der schon in einem
+    // Entwurf liegt.
+    const row = await getReceipt(userId, saved.id);
 
-    return c.json({ receipt: toView(row) }, 201);
+    return c.json({ receipt: toView(row!) }, 201);
   })
 
   /**
