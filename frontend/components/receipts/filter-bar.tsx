@@ -9,16 +9,21 @@
 // Filters ist meistens leer.
 
 import { useRouter } from "next/navigation";
-import { PERIODS, serializeReceiptQuery, type ReceiptQuery } from "@/lib/receipts/query-params";
+import {
+  PERIODS,
+  serializeReceiptQuery,
+  type ReceiptQuery,
+  type Source,
+} from "@/lib/receipts/query-params";
 
 /**
- * Die zwei Umschalter, die noch nichts filtern koennen.
- *
- * "With/Without receipt" braucht selbst eingetragene Belege, und die gibt es
- * nicht. Sie stehen hier, weil die Vorlage sie vorsieht und ihr Platz in der
- * Zeile sonst zweimal wandert.
+ * Mit oder ohne Beleg. Wie in der Vorlage schliessen sich die beiden aus: ein
+ * zweiter Klick auf den aktiven Umschalter hebt den Filter wieder auf.
  */
-const PENDING_TOGGLES = ["With receipt", "Without receipt"] as const;
+const SOURCE_TOGGLES: { value: Source; label: string }[] = [
+  { value: "receipt", label: "With receipt" },
+  { value: "none", label: "Without receipt" },
+];
 
 /** Die Pille aus der Vorlage (pill(on)): gefuellt, wenn aktiv. */
 const TOGGLE_CLASS = {
@@ -96,17 +101,20 @@ export function FilterBar({
         Unassigned only
       </button>
 
-      {PENDING_TOGGLES.map((label) => (
-        <button
-          key={label}
-          type="button"
-          disabled
-          title="Not available yet - needs self-entered expenses"
-          className="border-line bg-surface text-ink-3 h-9 cursor-not-allowed rounded-[10px] border px-[13px] text-[13px] opacity-60"
-        >
-          {label}
-        </button>
-      ))}
+      {SOURCE_TOGGLES.map((toggle) => {
+        const active = query.source === toggle.value;
+        return (
+          <button
+            key={toggle.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => go({ source: active ? "" : toggle.value })}
+            className={active ? TOGGLE_CLASS.on : TOGGLE_CLASS.off}
+          >
+            {toggle.label}
+          </button>
+        );
+      })}
 
       <span className="text-ink-3 ml-1 text-xs">Period applies to the receipt date</span>
 

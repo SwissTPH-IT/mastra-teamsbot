@@ -36,7 +36,8 @@ export const apiReceiptSchema = z.object({
   receiptType: z.string().nullable(),
   confidence: z.string().nullable(),
   issues: z.array(z.string()),
-  fileReference: z.string(),
+  /** null bei Ausgaben ohne Beleg (im Web erfasst). */
+  fileReference: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

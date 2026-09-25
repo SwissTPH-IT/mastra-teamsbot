@@ -30,7 +30,7 @@ const LOCAL_REFERENCE = /^local:uploads\/([A-Za-z0-9-]+\.[a-z]{3,4})$/;
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
-  let fileReference: string;
+  let fileReference: string | null;
   try {
     fileReference = (await fetchReceipt(id)).fileReference;
   } catch (error) {
@@ -42,6 +42,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     }
     console.error("[frontend] Beleg fuer Bildabruf nicht ladbar:", error);
     return NextResponse.json({ error: "Receipt service unavailable." }, { status: 502 });
+  }
+
+  // Ausgabe ohne Beleg: es gibt schlicht kein Bild. 404 und nicht 501 - das
+  // ist kein fehlendes Feature, sondern der erwartete Zustand.
+  if (fileReference === null) {
+    return NextResponse.json({ error: "This expense has no receipt image." }, { status: 404 });
   }
 
   const match = LOCAL_REFERENCE.exec(fileReference);

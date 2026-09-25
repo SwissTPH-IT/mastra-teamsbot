@@ -1,13 +1,14 @@
 # Spesen – Weboberfläche
 
-Die Selbstverwaltung der eigenen Belege: ansehen, prüfen, Kategorie und Belegart
-korrigieren, zu Abrechnungen bündeln und einreichen, als CSV exportieren. Nach
-dem Login sieht **jeder nur seine eigenen** Belege und Abrechnungen.
+Die Selbstverwaltung der eigenen Belege: ansehen, prüfen, nachträglich
+korrigieren, Kleinbeträge ohne Beleg erfassen, zu Abrechnungen bündeln und
+einreichen, als CSV exportieren. Nach dem Login sieht **jeder nur seine eigenen**
+Belege und Abrechnungen.
 
-Erfasst wird hier nichts. Belege kommen über Microsoft Teams herein, der
+Belege *mit Bild* kommen ausschliesslich über Microsoft Teams herein: der
 Human-in-the-Loop-Flow des Agenten legt sie dem Nutzer vor, und erst nach seiner
-Bestätigung entsteht eine Zeile in `app.receipts`. Diese Oberfläche ist die Sicht
-darauf.
+Bestätigung entsteht eine Zeile in `app.receipts`. Hier entsteht nur eine Art
+Zeile: die Ausgabe **ohne** Beleg (siehe „Erfassen ohne Beleg").
 
 Grundlage ist das Mockup „Swiss TPH Expenses" (`dev/Swiss TPH Expenses.html`).
 Umgesetzt sind der Belegteil und die Abrechnungen mit den Zuständen Draft und
@@ -126,13 +127,10 @@ Was in der Tabelle steht, ist damit auch das, was in der Datei landet.
 Sichtbar und erkennbar deaktiviert, nicht entfernt: so ist zu sehen, wohin das
 gehört, ohne es anklicken zu können.
 
-| Element                                                                                             | Grund                                                                                                                                                                                       |
-| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Navigationspunkt **Settlements**, die vier Statuskacheln auf der Startseite, „Assign to settlement" | Es gibt weder `app.expense_reports` noch Endpunkte dafür (Plan, Phase 5). Eine „0.00" pro Kachel würde behaupten, es gebe keine Abrechnungen – statt zu sagen, dass es sie noch nicht gibt. |
-| **Add expense without receipt**                                                                     | Entworfen (Betragsgrenze, Begründungspflicht, Fremdwährungsfrage), aber weder im Schema noch im Dienst vorhanden: `app.receipts` verlangt Dateireferenz und Datei-Hash.                     |
-| Filter **Unassigned only**, **With receipt**, **Without receipt**                                   | Brauchen Abrechnungen bzw. selbst eingetragene Belege.                                                                                                                                      |
-| Spalte **Assignment**                                                                               | Bleibt stehen und zeigt „not assigned". Sie später wieder einzusetzen würde die Spaltenbreiten zweimal verschieben.                                                                         |
-| **Capture in Teams**                                                                                | Ein echter Deep Link braucht die Bot-ID des Tenants. Mit `TEAMS_CHAT_URL` wird der Knopf aktiv, ohne bleibt er deaktiviert – besser als eine geratene URL.                                  |
+| Element | Grund |
+| --- | --- |
+| Statuskacheln **Approved** und **Query** auf der Startseite | Beide setzen eine Prüfung durch Finance voraus, und diese Rolle gibt es im System nicht (siehe „Abrechnungen: zwei Zustände statt vier"). |
+| **Capture in Teams** | Ein echter Deep Link braucht die Bot-ID des Tenants. Mit `TEAMS_CHAT_URL` wird der Knopf aktiv, ohne bleibt er deaktiviert – besser als eine geratene URL. |
 
 ## Abweichungen vom Mockup
 
@@ -160,11 +158,25 @@ gehört, ohne es anklicken zu können.
   bis späteste Belegdatum ihrer Positionen, gerechnet und nicht gespeichert.
 - **Submit verlangt die Belegart** an jedem Beleg („Required before
   submitting" steht im Entwurf am Feld). Der Dienst prüft es, die Seite markiert
-  die Positionen mit „Type missing".
+  die Positionen mit „Type missing". Eine Ausgabe ohne Beleg hat die Belegart
+  `none` und ist damit einreichbar.
 - **Kein „Download Excel" / PDF** an der eingereichten Abrechnung. Der CSV-Export
   der Belegliste hat dafür eine Spalte „Settlement".
 - **Die Auswahl gilt pro Seite.** Blättern oder Filtern leert sie – eine
   Auswahl, die man nicht mehr sieht, wäre eine Fehlerquelle.
+- **Ohne Beleg als Seite statt Dialog.** Der Entwurf öffnet „Add expense without
+  receipt" als Overlay. Hier ist es `/receipts/new`: funktioniert ohne
+  JavaScript, hat eine Adresse und braucht keine abgefangene Route. Felder,
+  Texte und der Regel-Kasten sind die des Dialogs; der „Preview state"-Umschalter
+  des Entwurfs entfällt, die drei Zustände ergeben sich aus der Eingabe.
+- **Fremdwährung ohne Beleg:** Der Entwurf lässt offen, welcher Kurs für die
+  20-CHF-Grenze gilt. Geprüft wird der **Nominalbetrag** ohne Umrechnung (ein
+  Kurs steht nirgends im System), und die offene Frage bleibt im Formular
+  sichtbar, wie im Entwurf.
+- **Korrigierbare Felder im Detail** sind Händler/Label, Datum, Betrag, Währung,
+  MwSt. und Zahlungsart (ohne Beleg: Label, Datum, Betrag, Währung, Begründung).
+  Die übrigen ausgelesenen Werte stehen darunter nur lesbar („Other extracted
+  fields").
 - **Nur Hell.** Der Entwurf definiert `color-scheme: light` und kein dunkles
   Gegenstück; einen selbst erfundenen Dunkelmodus hätte niemand entschieden.
 - **Sprache.** Die Oberflächentexte sind englisch, 1:1 aus dem Entwurf – anders
@@ -243,20 +255,53 @@ sonst als Selbsteinschätzung gelesen wird.
 
 ## Korrigieren
 
-Kategorie und Belegart auf der Detailseite (`PATCH /receipts/:id`). Das sind die beiden Felder, die der Extraktions-Agent
-bewusst leer lässt – sie müssen von Hand gesetzt werden können.
+Die Detailseite korrigiert über `PATCH /receipts/:id`:
 
-Betrag, Datum und Währung bleiben dem Teams-Dialog vorbehalten: dort liegt das
-Belegbild daneben, und zwei Wege zu derselben Zahl sind einer zu viel. Ein leeres
-Auswahlfeld bedeutet „nicht gesetzt" und wird im Dienst zu `NULL`, nicht zu einem
-Leerstring.
+- **Kategorie und Belegart** – die lässt der Extraktions-Agent bewusst leer.
+- **Die Fachwerte** – Händler, Datum, Betrag, Währung, MwSt., Zahlungsart; bei
+  einer Ausgabe ohne Beleg Label, Datum, Betrag, Währung und Begründung. Im
+  Teams-Dialog sind nur vier Felder bestätigbar, und die Extraktion liest
+  manchmal falsch – ohne diesen Weg bliebe ein falscher Händler für immer stehen.
+
+Die Werte gehen **roh** an den Dienst („12,50", „1'234.50", „14.03.2026") und
+werden dort mit denselben Parsern wie bei der Extraktion gelesen. Was sich nicht
+lesen lässt, wird abgelehnt statt still zu `NULL` – das Feld wird markiert, das
+Getippte bleibt stehen. Leer heisst „nicht gesetzt" und wird `NULL`.
+
+Ändert sich ein Fachwert tatsächlich, setzt der Dienst `corrected_at` und rechnet
+die Konfidenz neu. Ab dann gilt der Beleg als nachgesehen: das „Review"-Abzeichen
+und der Prüfhinweis verschwinden, im Kopf steht „corrected <Zeitpunkt>". Nur
+Kategorie oder Belegart zu setzen zählt nicht als Korrektur.
+
+Bei Ausgaben ohne Beleg gilt die 20-CHF-Grenze auch nach dem Erfassen – aus
+12.00 lässt sich per Korrektur nicht 120.00 machen.
 
 Das Formular ist ein echtes `<form>` mit einer Server Action und funktioniert
 ohne JavaScript.
 
-Liegt der Beleg in einer eingereichten Abrechnung, ist das Formular gesperrt.
-Die Sperre selbst sitzt im Dienst (409 mit `code: "locked"`); die Seite zeigt sie
-nur an.
+Liegt der Beleg in einer eingereichten Abrechnung, ist das Formular gesperrt –
+alle Felder, auch die Fachwerte. Die Sperre selbst sitzt im Dienst (409 mit
+`code: "locked"`, im WHERE derselben Query wie die Korrektur); die Seite zeigt
+sie nur an.
+
+## Erfassen ohne Beleg
+
+`/receipts/new` („Add expense without receipt" auf Start- und Listenseite),
+`POST /receipts/manual`. Felder wie im Entwurf: Datum, Betrag + Währung (CHF,
+EUR), Kategorie, Label (steht in der Liste statt eines Händlers), die
+**Begründung, die Pflicht ist**, und optional ein Abrechnungsentwurf, in den die
+Ausgabe gleich gelegt wird.
+
+- **Grenze 20.00 CHF pro Posten.** Das Formular zeigt sie beim Tippen und sperrt
+  „Save" darüber; entschieden wird im Dienst (`src/mastra/receipts/no-receipt.ts`).
+- **Idempotent:** die Seite vergibt die id der künftigen Zeile beim Rendern. Ein
+  doppelt abgeschicktes Formular trifft dieselbe Zeile statt eine zweite
+  Ausgabe anzulegen – einen Datei-Hash, der das sonst übernimmt, gibt es ohne
+  Datei nicht.
+- In der Datenbank ist „ohne Beleg" schlicht `file_reference IS NULL`; ein
+  `CHECK` verlangt dann eine Begründung. Belegart ist `none`, Konfidenz leer.
+- Das Konto muss verknüpft sein (eine Nachricht an den Teams-Bot genügt), sonst
+  weiss der Dienst nicht, wem die Ausgabe gehört.
 
 ## Abrechnungen
 

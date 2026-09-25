@@ -18,6 +18,13 @@ export const SORT_FIELDS = ["receiptDate", "totalAmount", "createdAt", "merchant
 export type SortField = (typeof SORT_FIELDS)[number];
 export type SortDirection = "asc" | "desc";
 
+/**
+ * Herkunft: mit Beleg (aus Teams) oder ohne (im Web selbst erfasst).
+ * Leer heisst "beides". Die Werte sind die des Dienstes.
+ */
+export const SOURCES = ["receipt", "none"] as const;
+export type Source = (typeof SOURCES)[number];
+
 export const PAGE_SIZES = [25, 50, 100, 200] as const;
 const DEFAULT_PAGE_SIZE = 50;
 
@@ -34,6 +41,8 @@ export type ReceiptQuery = {
   category: string;
   /** Nur Belege, die in keiner Abrechnung liegen. In der URL als `unassigned=1`. */
   unassigned: boolean;
+  /** Mit oder ohne Beleg. Leer heisst "beides". */
+  source: Source | "";
   sort: SortField;
   dir: SortDirection;
   page: number;
@@ -53,6 +62,7 @@ export const QUERY_PARAM_KEYS = [
   "period",
   "category",
   "unassigned",
+  "source",
   "sort",
   "dir",
   "page",
@@ -106,6 +116,7 @@ export function parseReceiptQuery(input: URLSearchParams): ReceiptQuery {
     period,
     category: readOne(input, "category") ?? "",
     unassigned: readOne(input, "unassigned") === "1",
+    source: SOURCES.find((value) => value === readOne(input, "source")) ?? "",
     sort,
     dir: readOne(input, "dir") === "asc" ? "asc" : "desc",
     page,
@@ -140,7 +151,7 @@ export function serializeReceiptQuery(
   overrides: Partial<ReceiptQuery> = {},
 ): string {
   const resetsPage = Object.keys(overrides).some((key) =>
-    ["q", "period", "category", "unassigned", "pageSize", "sort", "dir"].includes(key),
+    ["q", "period", "category", "unassigned", "source", "pageSize", "sort", "dir"].includes(key),
   );
   const merged = { ...query, ...overrides, ...(resetsPage ? { page: 1 } : {}) };
   const params = new URLSearchParams();
@@ -149,6 +160,7 @@ export function serializeReceiptQuery(
   if (merged.period !== DEFAULT_PERIOD) params.set("period", merged.period);
   if (merged.category) params.set("category", merged.category);
   if (merged.unassigned) params.set("unassigned", "1");
+  if (merged.source) params.set("source", merged.source);
   if (merged.sort !== "receiptDate") params.set("sort", merged.sort);
   if (merged.dir !== "desc") params.set("dir", merged.dir);
   if (merged.pageSize !== DEFAULT_PAGE_SIZE) params.set("pageSize", String(merged.pageSize));
@@ -160,6 +172,10 @@ export function serializeReceiptQuery(
 /** True, wenn ueberhaupt ein Filter gesetzt ist - unterscheidet die Empty States. */
 export function hasActiveFilter(query: ReceiptQuery): boolean {
   return (
-    query.q !== "" || query.category !== "" || query.unassigned || query.period !== DEFAULT_PERIOD
+    query.q !== "" ||
+    query.category !== "" ||
+    query.unassigned ||
+    query.source !== "" ||
+    query.period !== DEFAULT_PERIOD
   );
 }
