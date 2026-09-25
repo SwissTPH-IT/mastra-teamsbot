@@ -119,8 +119,8 @@ export async function reportOutcome(
     if (!payload) {
       await closePendingReview(thread.id);
       await thread.post(
-        '❌ Der Beleg wurde gelesen, aber die Vorlage zum Prüfen konnte nicht aufgebaut werden. ' +
-          'Bitte den Beleg noch einmal schicken.',
+        '❌ The receipt was read, but the review card could not be built. ' +
+          'Please send the receipt again.',
       );
       return;
     }
@@ -137,7 +137,7 @@ export async function reportOutcome(
     return;
   }
 
-  await thread.post(`❌ Der Beleg konnte nicht verarbeitet werden (Status "${result.status}").`);
+  await thread.post(`❌ The receipt could not be processed (status "${result.status}").`);
 }
 
 /**
@@ -195,8 +195,8 @@ export async function resumeReview(args: {
 
   if (expectedRunId && expectedRunId !== pending.runId) {
     await thread.post(
-      'Diese Vorlage gehört zu einem älteren Beleg und ist nicht mehr aktuell. ' +
-        'Bitte die neueste Karte in diesem Verlauf benutzen.',
+      'This card belongs to an older receipt and is no longer current. ' +
+        'Please use the latest card in this conversation.',
     );
     return;
   }
@@ -208,7 +208,7 @@ export async function resumeReview(args: {
     if (!state || state.status !== 'suspended') {
       await closePendingReview(thread.id);
       await thread.post(
-        'Zu diesem Thread ist kein offener Beleg mehr vorhanden. Schick den Beleg bitte noch einmal.',
+        'There is no open receipt in this thread any more. Please send the receipt again.',
       );
       return;
     }
@@ -216,7 +216,7 @@ export async function resumeReview(args: {
     const suspendedStep = createWorkflowStateReader(state).getSuspendedStep();
     const run = await workflow.createRun({ runId: pending.runId });
 
-    await thread.startTyping('Einen Moment…');
+    await thread.startTyping('One moment…');
     const result = await run.resume({
       step: suspendedStep?.path,
       resumeData,
@@ -227,6 +227,8 @@ export async function resumeReview(args: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger?.error(`[teams] Resume für Run ${pending.runId} fehlgeschlagen: ${message}`);
-    await thread.post(`❌ Die Antwort konnte nicht verarbeitet werden: ${message}`);
+    // Die Ursache steht im Log. Im Thread nur eine englische Meldung – die
+    // Fehlertexte von API und Workflow sind deutsch und gehören nicht in Teams.
+    await thread.post('❌ Your reply could not be processed. Please try again.');
   }
 }

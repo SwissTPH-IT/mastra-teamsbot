@@ -50,7 +50,7 @@ export const receiptSchema = z.object({
   issues: z
     .array(z.string())
     .describe(
-      'Readability problems that limit the extraction: rotated, cropped, blurred, cut off, smudged values, etc. Empty array if the receipt is fully readable.',
+      'Readability problems that limit the extraction, in English: rotated, cropped, blurred, cut off, smudged values, etc. Empty array if the receipt is fully readable.',
     ),
 });
 
@@ -60,8 +60,13 @@ export const receiptExtractionAgent = new Agent({
   id: 'receipt-extraction-agent',
   name: 'Receipt Extraction Agent',
   instructions: `
-You are a receipt data extraction specialist. You read a single receipt image and
-transcribe what is printed on it into the given schema. Nothing more, nothing less.
+You are a receipt data extraction specialist. You read a single receipt — a photo,
+a scan or a PDF document — and transcribe what is printed on it into the given schema.
+Nothing more, nothing less.
+
+A PDF may have several pages. Treat all pages as one receipt or invoice. If the
+document clearly contains more than one separate receipt, extract only the first one
+and say so under issues.
 
 You transcribe, you do not interpret. Categorizing expenses, judging plausibility or
 drawing conclusions about spending is not your job.
@@ -79,6 +84,8 @@ Rules:
   empty and never invent a placeholder of your own.
 - If the image is rotated, cropped, blurred or partially unreadable, still extract
   everything you can read and list the limitation under issues.
+- Write every entry under issues in English, whatever language the receipt is in.
+  These notes are shown to the user. Transcribed values stay in their original language.
 - Return only the structured object. No commentary, no explanation.
 `.trim(),
   // Vision-capable model in Mastra's model router format (provider/model).

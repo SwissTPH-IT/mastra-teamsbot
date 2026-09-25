@@ -7,9 +7,13 @@
 // Wert, der beim Klick wieder in `chat.onAction` ankommt. Eine handgeschriebene
 // Karte müsste dieses Protokoll nachbauen.
 //
+// Alle Texte, die der Nutzer sieht, sind Englisch – unabhängig davon, in
+// welcher Sprache er schreibt oder der Beleg gedruckt ist. Die Teams-Interaktion
+// ist durchgehend auf Englisch normalisiert.
+//
 // Eingabefelder kann eine Karte nicht tragen: der CardChild-Typ des SDK kennt
 // nur Text, Felder, Tabellen und Buttons. Das Korrigieren läuft deshalb über
-// einen Teams-Dialog (Task Module) – der Button "Anpassen" ist ein Button mit
+// einen Teams-Dialog (Task Module) – der Button "Adjust" ist ein Button mit
 // `actionType: 'modal'`, was der Adapter zu `msteams: { type: 'task/fetch' }`
 // macht, und `event.openModal()` beantwortet den Invoke mit dem Dialog.
 //
@@ -101,22 +105,23 @@ const MESSAGE_ID_SEPARATOR = '~';
 /** Die Eingabe-IDs im Dialog sind die Feldnamen des Kandidaten – ohne Umbenennungstabelle. */
 export const MODAL_INPUT_IDS = REVIEW_FIELDS;
 
-const NOT_READ = 'nicht gelesen';
+const NOT_READ = 'not read';
 
 /** Die Währungen, die `parseCurrency()` kennt. Mehr anzubieten wäre gelogen. */
 const CURRENCY_CHOICES = ['CHF', 'EUR', 'USD', 'GBP'];
 
 const LABELS: Record<ReviewField, string> = {
-  receiptDate: 'Datum',
-  currency: 'Währung',
-  vatAmount: 'Steuer (MwSt.-Betrag)',
-  totalAmount: 'Total (Betrag)',
+  receiptDate: 'Date',
+  currency: 'Currency',
+  totalAmount: 'Total',
 };
+
+const MERCHANT_LABEL = 'Merchant';
 
 /**
  * Die Karte im Thread.
  *
- * Zeigt die vier bestätigungspflichtigen Felder plus den Händler zur
+ * Zeigt die drei bestätigungspflichtigen Felder plus den Händler zur
  * Orientierung – ohne ihn ist auf einen Blick nicht klar, um welchen Beleg es
  * geht, wenn jemand mehrere hintereinander schickt.
  */
@@ -131,10 +136,9 @@ export function buildReviewCard(payload: {
 
   const children: CardChild[] = [
     Fields([
-      Field({ label: 'Händler', value: candidate.merchant ?? NOT_READ }),
+      Field({ label: MERCHANT_LABEL, value: candidate.merchant ?? NOT_READ }),
       Field({ label: LABELS.receiptDate, value: candidate.receiptDate ?? NOT_READ }),
       Field({ label: LABELS.currency, value: candidate.currency ?? NOT_READ }),
-      Field({ label: LABELS.vatAmount, value: candidate.vatAmount ?? NOT_READ }),
       Field({ label: LABELS.totalAmount, value: candidate.totalAmount ?? NOT_READ }),
     ]),
   ];
@@ -145,27 +149,27 @@ export function buildReviewCard(payload: {
 
   children.push(
     CardText(
-      'Stimmen Datum, Währung, Steuer und Total? Dann **Bestätigen**. Sonst **Anpassen** – ' +
-        'oder antworte einfach im Thread, wenn etwas anderes falsch ist (z. B. der Händler).',
+      'Are date, currency and total correct? Then **Confirm**. Otherwise **Adjust** – ' +
+        'or just reply in this thread if something else is wrong (e.g. the merchant).',
       { style: 'muted' },
     ),
     Actions([
       Button({
         id: actionId('confirm', runId),
-        label: 'Bestätigen & speichern',
+        label: 'Confirm & save',
         style: 'primary',
       }),
       // actionType 'modal' -> der Adapter hängt msteams:{type:'task/fetch'} an
       // den Submit, und Teams holt sich den Dialog per Invoke bei uns ab.
-      Button({ id: actionId('edit', runId), label: 'Anpassen', actionType: 'modal' }),
-      Button({ id: actionId('cancel', runId), label: 'Abbrechen', style: 'danger' }),
+      Button({ id: actionId('edit', runId), label: 'Adjust', actionType: 'modal' }),
+      Button({ id: actionId('cancel', runId), label: 'Cancel', style: 'danger' }),
     ]),
   );
 
   return Card({
     title: payload.isRecheck
-      ? `Beleg korrigiert – bitte prüfen (Runde ${payload.round} von ${payload.maxRounds})`
-      : 'Beleg gelesen – bitte prüfen',
+      ? `Receipt corrected – please check (round ${payload.round} of ${payload.maxRounds})`
+      : 'Receipt read – please check',
     children,
   });
 }
@@ -179,20 +183,19 @@ export function buildReviewCard(payload: {
  */
 export function reviewFallbackText(candidate: ReceiptCandidate): string {
   return [
-    '**Beleg gelesen – bitte prüfen**',
+    '**Receipt read – please check**',
     candidateSummary(candidate),
-    'Antworte mit **"passt"**, einer Korrektur oder **"abbrechen"**.',
+    'Reply **"ok"** to confirm, describe a correction, or reply **"cancel"**.',
   ].join('\n\n');
 }
 
-/** Die fünf Zeilen, die Karte, Fallback-Text und die entwertete Karte gemeinsam haben. */
+/** Die vier Zeilen, die Karte, Fallback-Text und die entwertete Karte gemeinsam haben. */
 export function candidateSummary(candidate: ReceiptCandidate): string {
   const line = (label: string, value: string | null) => `- **${label}:** ${value ?? `_${NOT_READ}_`}`;
   return [
-    line('Händler', candidate.merchant),
+    line(MERCHANT_LABEL, candidate.merchant),
     line(LABELS.receiptDate, candidate.receiptDate),
     line(LABELS.currency, candidate.currency),
-    line(LABELS.vatAmount, candidate.vatAmount),
     line(LABELS.totalAmount, candidate.totalAmount),
   ].join('\n');
 }
@@ -209,9 +212,9 @@ export function retiredCardText(
   outcome: 'confirmed' | 'cancelled' | 'edited',
 ): string {
   const header = {
-    confirmed: '✅ **Bestätigt**',
-    cancelled: '🚫 **Abgebrochen** – nichts gespeichert',
-    edited: '✅ **Angepasst und bestätigt**',
+    confirmed: '✅ **Confirmed**',
+    cancelled: '🚫 **Cancelled** – nothing saved',
+    edited: '✅ **Adjusted and confirmed**',
   }[outcome];
 
   return `${header}\n\n${candidateSummary(candidate)}`;
@@ -221,10 +224,10 @@ export function retiredCardText(
  * Der Korrektur-Dialog.
  *
  * Datum als echtes Datumsfeld (Adaptive `Input.Date`), die Währung als Auswahl
- * – beides Eingaben, bei denen Freitext nur Tippfehler produziert. Die beiden
- * Beträge bleiben Textfelder: `Input.Number` kennt je nach Client nur ganze
- * Zahlen bzw. das falsche Dezimaltrennzeichen, und `parseAmount()` versteht
- * ohnehin sowohl "42.10" als auch "42,10".
+ * – beides Eingaben, bei denen Freitext nur Tippfehler produziert. Der Betrag
+ * bleibt ein Textfeld: `Input.Number` kennt je nach Client nur ganze Zahlen
+ * bzw. das falsche Dezimaltrennzeichen, und `parseAmount()` versteht ohnehin
+ * sowohl "42.10" als auch "42,10".
  *
  * Alle Felder sind optional – leer heisst "kein Wert", nicht "Pflichtfeld
  * vergessen".
@@ -266,27 +269,20 @@ export function buildEditModal(payload: {
       ),
     }),
     TextInput({
-      id: 'vatAmount',
-      label: LABELS.vatAmount,
-      initialValue: initial('vatAmount'),
-      placeholder: 'z. B. 3.20 – leer lassen, wenn keine Steuer ausgewiesen ist',
-      optional: true,
-    }),
-    TextInput({
       id: 'totalAmount',
       label: LABELS.totalAmount,
       initialValue: initial('totalAmount'),
-      placeholder: 'z. B. 42.10',
+      placeholder: 'e.g. 42.10',
       optional: true,
     }),
   );
 
   return Modal({
     callbackId: editModalCallbackId(runId, payload.cardMessageId),
-    title: 'Beleg anpassen',
-    submitLabel: 'Übernehmen & speichern',
+    title: 'Adjust receipt',
+    submitLabel: 'Apply & save',
     children,
-    closeLabel: 'Zurück',
+    closeLabel: 'Back',
   });
 }
 

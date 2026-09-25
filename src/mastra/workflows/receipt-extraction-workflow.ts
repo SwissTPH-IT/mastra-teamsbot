@@ -2,7 +2,7 @@
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { z } from 'zod';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname, extname } from 'node:path';
+import { basename, dirname, extname } from 'node:path';
 import { receiptSchema } from '../agents/receipt-agent';
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -61,9 +61,13 @@ const loadReceipt = createStep({
 });
 
 /**
- * Step 2 — Extract: hand the image to the agent and get back a validated object.
+ * Step 2 — Extract: hand the file to the agent and get back a validated object.
  * The agent is called from execute() (not composed via .agent()) because the input
- * is an image message, not a plain prompt string.
+ * is a file message, not a plain prompt string.
+ *
+ * A PDF goes in as a file part, not an image part: providers reject a PDF sent
+ * as an image, but read it natively (all pages) as a document. Every other format
+ * has already been normalized to JPEG/PNG/WebP/GIF by `receipts/file-format.ts`.
  */
 const extractReceipt = createStep({
   id: 'extract-receipt',
@@ -82,7 +86,9 @@ const extractReceipt = createStep({
         {
           role: 'user',
           content: [
-            { type: 'image', image: dataUrl, mimeType },
+            mimeType === 'application/pdf'
+              ? { type: 'file' as const, data: dataUrl, mimeType, filename: basename(receiptPath) }
+              : { type: 'image' as const, image: dataUrl, mimeType },
             { type: 'text', text: 'Extract this receipt into the given schema.' },
           ],
         },
@@ -128,7 +134,7 @@ const writeReceiptJson = createStep({
 export const receiptExtractionWorkflow = createWorkflow({
   id: 'receipt-extraction-workflow',
   inputSchema: z.object({
-    receiptPath: z.string().describe('Absolute path to the receipt image.'),
+    receiptPath: z.string().describe('Absolute path to the receipt file (image or PDF).'),
     receiptJsonPath: z.string().describe('Absolute path where the JSON result is written.'),
   }),
   outputSchema: z.object({

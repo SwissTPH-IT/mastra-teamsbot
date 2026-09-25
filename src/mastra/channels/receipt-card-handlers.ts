@@ -34,10 +34,10 @@ import { USER_ID_KEY } from '../tools/tool-context';
 /** Die Agent-`id`, an der die Teams-Kanäle hängen (nicht der Registrierungs-Key). */
 const TEAMS_AGENT_ID = 'teams-agent';
 
+// Was im Thread landet, ist Englisch (siehe receipt-review-card.ts).
 const NO_OPEN_REVIEW =
-  'Zu diesem Thread ist kein offener Beleg mehr vorhanden. Schick den Beleg bitte noch einmal.';
-const NOT_YOUR_REVIEW =
-  'Diesen Beleg kann nur bestätigen, wer ihn geschickt hat.';
+  'There is no open receipt in this thread any more. Please send the receipt again.';
+const NOT_YOUR_REVIEW = 'Only the person who sent this receipt can confirm it.';
 
 /**
  * Die Action- und Dialog-Handler an die Chat-Instanz des Teams-Agenten hängen.
@@ -100,8 +100,8 @@ async function claimPendingReview(
   }
   if (pending.runId !== runId) {
     await thread.post(
-      'Diese Vorlage gehört zu einem älteren Beleg und ist nicht mehr aktuell. ' +
-        'Bitte die neueste Karte in diesem Verlauf benutzen.',
+      'This card belongs to an older receipt and is no longer current. ' +
+        'Please use the latest card in this conversation.',
     );
     return null;
   }
@@ -233,7 +233,7 @@ async function handleEditSubmit(
   return { action: 'close' };
 }
 
-/** Nur die vier bekannten Eingaben übernehmen – alles andere gehört nicht in den Datensatz. */
+/** Nur die drei bekannten Eingaben übernehmen – alles andere gehört nicht in den Datensatz. */
 function readEdits(values: Record<string, string>): ReviewEdits {
   const edits: ReviewEdits = {};
   for (const id of MODAL_INPUT_IDS) {

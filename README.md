@@ -119,7 +119,7 @@ Migrationen bleiben hier.
 | `agents/assistant-agent.ts` | Beispiel-Agent aus dem Ausgangs-Stack (Wetter-Tool, Working Memory) |
 | `agents/teams-agent.ts` | Der Microsoft-Teams-Bot: Adapter, Handler-Registrierung, DB-Tools, Instructions |
 | `channels/teams-receipt-handler.ts` | Teams-Anhang → Review-Workflow; und die getippte Antwort des Nutzers → `run.resume()` |
-| `channels/receipt-review-card.ts` | Die Adaptive Card (Datum, Währung, Steuer, Total) und der Anpassen-Dialog |
+| `channels/receipt-review-card.ts` | Die Adaptive Card (Datum, Währung, Total – englisch) und der Adjust-Dialog |
 | `channels/receipt-card-handlers.ts` | `chat.onAction` / `chat.onModalSubmit`: Klick auf die Karte → `run.resume()` |
 | `channels/receipt-review-session.ts` | Die gemeinsame Mitte beider Wege: Run fortsetzen, Ergebnis im Thread berichten |
 | `model.ts` | Eine Stelle für die Modellwahl (`MASTRA_MODEL`) |
@@ -314,11 +314,16 @@ npm run typecheck && npm run build && npm run lint
 
 ## Grenzen und Stellschrauben
 
-- **Dateitypen:** JPG, PNG, WebP, GIF. PDF ist absichtlich nicht dabei – der
-  Workflow würde es als Bildteil an das Modell geben, was die meisten Provider
-  ablehnen. Erweitern in `src/mastra/receipts/upload-store.ts`
-  (`ALLOWED_UPLOAD_TYPES`) und `MIME_BY_EXT` in `server/receipt-routes.ts`.
-- **Maximalgröße:** 15 MB pro Bild, an drei Stellen konsistent gehalten
+- **Dateitypen:** JPEG, PNG, WebP, GIF, HEIC/HEIF, AVIF, TIFF, BMP und PDF.
+  Erkannt wird an den Magic Bytes (`src/mastra/receipts/file-format.ts`), nie am
+  gemeldeten Typ. JPEG/PNG/WebP/GIF und PDF gehen unverändert ans Modell – PDF als
+  File-Part, nicht als Bild, sonst lehnen die Provider es ab. Alles andere wird beim
+  Ablegen einmal nach JPEG konvertiert (sharp; HEVC-HEIC über `heic-decode`, weil
+  die Prebuilt-libvips es nicht dekodieren kann; BMP über `bmp-js`), ein animiertes
+  GIF zu seinem ersten Bild als PNG. Mehrseitiges TIFF: nur Seite 1 – mehrseitig
+  bitte als PDF. `MASTRA_MODEL` muss Bilder **und** PDFs lesen können.
+  SVG ist absichtlich nicht dabei.
+- **Maximalgröße:** 15 MB pro Datei, an drei Stellen konsistent gehalten
   (`upload-store.ts`, `server.bodySizeLimit`, Teams-Handler).
 - **Kein Auth.** Studio, Upload-Endpunkt und die Weboberfläche sind offen. Für
   alles außerhalb von localhost gehört ein Reverse Proxy mit Authentifizierung
@@ -348,24 +353,24 @@ Teams-Nachricht MIT Bildanhang
               └─ run.start()
                     └─ receipt-extraction-workflow   (unverändert)
                     └─ review-candidate  ──► suspend ──► Adaptive Card im Thread
-                                                          Händler · Datum · Währung
-                                                          Steuer · Total
-                                                          [Bestätigen] [Anpassen] [Abbrechen]
+                                                          Merchant · Date · Currency
+                                                          Total
+                                                          [Confirm & save] [Adjust] [Cancel]
 
 Klick auf die Karte (Action.Submit, KEINE Nachricht)
   └─► chat.onAction  (channels/receipt-card-handlers.ts)
-        ├─ "Bestätigen" → run.resume({ kind: 'confirm' }) → app.receipts  ✅
-        ├─ "Anpassen"   → task/fetch → Dialog mit den vier Feldern
+        ├─ "Confirm"    → run.resume({ kind: 'confirm' }) → app.receipts  ✅
+        ├─ "Adjust"     → task/fetch → Dialog mit den drei Feldern
         │                   └─ Submit → applyReviewEdits() → resume({ kind: 'edit' }) ✅
-        └─ "Abbrechen"  → run.resume({ kind: 'cancel' })   → nichts gespeichert
+        └─ "Cancel"     → run.resume({ kind: 'cancel' })   → nichts gespeichert
 
 Teams-Nachricht OHNE Bildanhang
   └─► handleTeamsReceipt
         ├─ offener pending_review für diesen Thread?
         │    ja  → Antwort einordnen, run.resume()
-        │           ├─ "passt"      → persist-receipt → app.receipts  ✅
+        │           ├─ "ok"/"passt" → persist-receipt → app.receipts  ✅
         │           ├─ Korrektur    → Freitext anwenden → ERNEUT vorlegen
-        │           └─ "abbrechen"  → nichts gespeichert
+        │           └─ "cancel"     → nichts gespeichert
         └─ nein → Standard-Handler: der Agent antwortet, mit den DB-Tools
 ```
 
@@ -380,19 +385,26 @@ für Tool-Freigaben bleibt daneben bestehen, Handler sind additiv. Registriert
 wird beim Start (`src/mastra/index.ts`) und nicht beim ersten Beleg: eine Karte,
 die vor einem Deploy gepostet wurde, muss danach noch reagieren.
 
-Die vier Felder auf der Karte – **Datum, Währung, Steuer, Total** – sind die,
-die über die Buchung entscheiden. Eingabefelder direkt in der Karte gehen nicht
-(der `CardChild`-Typ des Chat SDK kennt nur Text, Felder, Tabellen und Buttons),
-deshalb öffnet „Anpassen" einen Teams-Dialog mit `Input.Date`, einer
-Währungsauswahl und zwei Textfeldern. Der Dialog-Submit ist gleichzeitig die
+Die drei Felder auf der Karte – **Datum, Währung, Total** – sind die, die über
+die Buchung entscheiden. Die MwSt. wird nicht gebraucht und deshalb nicht
+abgefragt; sie wird weiter extrahiert und mitgespeichert, aber nicht bestätigt.
+Eingabefelder direkt in der Karte gehen nicht (der `CardChild`-Typ des Chat SDK
+kennt nur Text, Felder, Tabellen und Buttons), deshalb öffnet „Adjust" einen
+Teams-Dialog mit `Input.Date`, einer Währungsauswahl und einem Textfeld. Der Dialog-Submit ist gleichzeitig die
 Bestätigung: die Werte hat der Nutzer selbst eingetippt. Sie laufen trotzdem
 durch dieselben Parser wie die Extraktion (`applyReviewEdits` in
 `receipts/candidate.ts`) – ein leeres Feld heisst „kein Wert", ein unlesbares
 Feld zeigt den Dialog erneut mit der Meldung, statt still `null` zu speichern.
 
 Alles andere (Händler, Positionen, Kategorie) bleibt dem Textweg überlassen: eine
-Antwort im Thread wird weiterhin als „passt", Korrektur oder „abbrechen"
-eingeordnet und legt die Karte danach erneut vor.
+Antwort im Thread wird als Zustimmung („ok", „looks good", auch „passt"), Korrektur
+oder Abbruch („cancel", auch „abbrechen") eingeordnet und legt die Karte nach einer
+Korrektur erneut vor.
+
+**Sprache:** Alles, was der Bot in Teams schreibt – Karte, Dialog, Status- und
+Fehlermeldungen, Agent-Antworten – ist Englisch, egal in welcher Sprache der Nutzer
+schreibt. Eingaben dürfen in jeder Sprache kommen. Deutsche Fehlertexte aus API und
+Workflow landen nur im Log; der Thread bekommt eine englische Meldung.
 
 ### Warum nach einer Korrektur nochmal nachgefragt wird
 
@@ -687,10 +699,10 @@ Das ZIP in Teams hochladen (*Apps → Manage your apps → Upload an app*).
 **10. Abnahme über den echten Weg.** Erst wenn das durchläuft, ist der Deploy
 gut:
 
-1. In Teams ein Belegfoto an den Bot senden.
-2. Der Bot legt die gelesenen Werte als Karte vor (Datum, Währung, Steuer, Total).
-3. „Bestätigen & speichern" klicken – oder „Anpassen", im Dialog ein Feld ändern
-   und übernehmen.
+1. In Teams ein Belegfoto (oder PDF) an den Bot senden.
+2. Der Bot legt die gelesenen Werte als englische Karte vor (Date, Currency, Total).
+3. „Confirm & save" klicken – oder „Adjust", im Dialog ein Feld ändern und
+   übernehmen.
 4. Im Frontend unter `/receipts` erscheint die Zeile – mit dem Belegdatum, dem
    Betrag in `de-CH` und dem Erfassungszeitpunkt in `Europe/Zurich`. Voraussetzung
    ist, dass dieselbe Person angemeldet ist: die Zuordnung läuft über
