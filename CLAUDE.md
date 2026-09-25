@@ -111,10 +111,11 @@ Key pieces (`src/mastra/`):
 
 ### The frontend talks to the API, not to the database
 
-`frontend/` is an npm workspace of the repo root (`"workspaces": ["frontend", "api"]`) and
-imports `mastra-teamsbot/db/schema` — i.e. `src/db/schema.ts` — via
-`transpilePackages: ['mastra-teamsbot']`. Two reasons it is a workspace and not a
-path alias to `../src/db`:
+`frontend/` is an npm workspace of the repo root (`"workspaces": ["frontend", "api"]`),
+but since the switch to the API service it imports **nothing** from `src/`: no
+schema, no repository, no `drizzle-orm`, no `pg`. `transpilePackages` and the
+frontend's own pool are gone. It is a workspace only so that one lockfile covers
+all three projects.
 
 Every read and the one write go through `frontend/lib/api/client.ts`, with two
 server-side headers:

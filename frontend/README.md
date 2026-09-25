@@ -96,7 +96,7 @@ app/
   (app)/settlements/actions.ts  Server Actions: zuordnen, entfernen, einreichen, löschen
   api/auth/[...nextauth]/     Anmeldevorgang
   api/export/route.ts         CSV, serverseitig gestreamt
-  api/healthz/route.ts        Health-Check inkl. Belegdienst (ohne Login)
+  api/healthz/route.ts        Health-Check (ohne Login), siehe unten
   api/receipts/[id]/image/    Proxy auf das Belegbild beim Agenten
 lib/
   api/client.ts               Der EINE Weg zu den Daten (server-only)
@@ -126,12 +126,13 @@ Was in der Tabelle steht, ist damit auch das, was in der Datei landet.
 Sichtbar und erkennbar deaktiviert, nicht entfernt: so ist zu sehen, wohin das
 gehört, ohne es anklicken zu können.
 
-| Element | Grund |
-|---|---|
-| Statuskacheln **Approved** und **Query** auf der Startseite | Beide setzen eine Prüfung durch Finance voraus; diese Rolle gibt es nicht, und `app.settlements` kennt nur `draft` und `submitted`. Eine „0.00" würde behaupten, es gebe keine genehmigten Abrechnungen – statt zu sagen, dass es die Prüfung noch nicht gibt. |
-| **Add expense without receipt** | Entworfen (Betragsgrenze, Begründungspflicht, Fremdwährungsfrage), aber weder im Schema noch im Dienst vorhanden: `app.receipts` verlangt Dateireferenz und Datei-Hash. |
-| Filter **With receipt**, **Without receipt** | Brauchen selbst eingetragene Belege. |
-| **Capture in Teams** | Ein echter Deep Link braucht die Bot-ID des Tenants. Mit `TEAMS_CHAT_URL` wird der Knopf aktiv, ohne bleibt er deaktiviert – besser als eine geratene URL. |
+| Element                                                                                             | Grund                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Navigationspunkt **Settlements**, die vier Statuskacheln auf der Startseite, „Assign to settlement" | Es gibt weder `app.expense_reports` noch Endpunkte dafür (Plan, Phase 5). Eine „0.00" pro Kachel würde behaupten, es gebe keine Abrechnungen – statt zu sagen, dass es sie noch nicht gibt. |
+| **Add expense without receipt**                                                                     | Entworfen (Betragsgrenze, Begründungspflicht, Fremdwährungsfrage), aber weder im Schema noch im Dienst vorhanden: `app.receipts` verlangt Dateireferenz und Datei-Hash.                     |
+| Filter **Unassigned only**, **With receipt**, **Without receipt**                                   | Brauchen Abrechnungen bzw. selbst eingetragene Belege.                                                                                                                                      |
+| Spalte **Assignment**                                                                               | Bleibt stehen und zeigt „not assigned". Sie später wieder einzusetzen würde die Spaltenbreiten zweimal verschieben.                                                                         |
+| **Capture in Teams**                                                                                | Ein echter Deep Link braucht die Bot-ID des Tenants. Mit `TEAMS_CHAT_URL` wird der Knopf aktiv, ohne bleibt er deaktiviert – besser als eine geratene URL.                                  |
 
 ## Abweichungen vom Mockup
 
@@ -193,6 +194,23 @@ der Ansichten genügt eine App-Registrierung mit der lokalen Redirect-URI
 `http://localhost:3000/api/auth/callback/microsoft-entra-id`; die eigene `oid`
 muss in `app.users.aad_object_id` stehen, sonst zeigt die Oberfläche die
 Erklärung „nothing linked yet" (was dann korrekt ist).
+
+## Wenn der Healthcheck rot ist
+
+`/api/healthz` beantwortet nicht "ist alles in Ordnung", sondern "hilft ein
+Neustart dieses Containers". Railway killt bei Rot den Container und blockiert
+den Deploy, deshalb drei verschiedene Antworten:
+
+| Antwort | Bedeutung | Was zu tun ist |
+|---|---|---|
+| `503 {"status":"misconfigured","api":"unconfigured"}` | `API_URL` ist auf diesem Service nicht gesetzt. Jeder Aufruf liefe gegen `localhost`. | Variable setzen: `http://receipt-api.railway.internal:4000` |
+| `200 {"status":"ok","api":"down","apiError":…}` | `API_URL` steht, der Dienst antwortet gerade nicht. | Den **API**-Service ansehen. Absichtlich kein Rot: ein Neustart des Frontends repariert einen fremden Dienst nicht, er wäre eine Neustartschleife für das Problem eines anderen Services. `/signin` lädt, und jede Datenseite erklärt den Zustand. |
+| `200 {"status":"ok","api":"up"}` | Die Kette steht. | – |
+
+`API_URL` ist eine Variable **dieses** Services, nicht des API-Services –
+Railway-Variablen sind pro Service und werden nicht vererbt. Denselben Zielwert
+trägt auch der Agent; `API_SERVICE_TOKEN` steht mit identischem Wert an allen
+drei Stellen.
 
 ## Zeitzonen und Zahlen
 
@@ -286,16 +304,16 @@ Download-Ordner.
 
 Siehe `.env.example` – dort steht zu jedem Wert, warum er gebraucht wird.
 
-| Variable | Pflicht | Zweck |
-|---|---|---|
-| `API_URL` | ja | Basis-URL des Belegdienstes |
-| `API_SERVICE_TOKEN` | ja | gemeinsames Geheimnis mit dem Dienst |
-| `AUTH_SECRET` | ja | verschlüsselt das Session-Cookie |
-| `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` / `_ISSUER` | ja | App-Registrierung |
-| `AUTH_URL` | hinter Proxy | öffentliche URL (Railway) |
-| `MASTRA_URL` | für Bilder | Agent-Service, hält die Belegdateien |
-| `API_TIMEOUT_MS` | nein | Default 15000 |
-| `TEAMS_CHAT_URL` | nein | Deep Link für „Capture in Teams" |
+| Variable                                             | Pflicht      | Zweck                                |
+| ---------------------------------------------------- | ------------ | ------------------------------------ |
+| `API_URL`                                            | ja           | Basis-URL des Belegdienstes          |
+| `API_SERVICE_TOKEN`                                  | ja           | gemeinsames Geheimnis mit dem Dienst |
+| `AUTH_SECRET`                                        | ja           | verschlüsselt das Session-Cookie     |
+| `AUTH_MICROSOFT_ENTRA_ID_ID` / `_SECRET` / `_ISSUER` | ja           | App-Registrierung                    |
+| `AUTH_URL`                                           | hinter Proxy | öffentliche URL (Railway)            |
+| `MASTRA_URL`                                         | für Bilder   | Agent-Service, hält die Belegdateien |
+| `API_TIMEOUT_MS`                                     | nein         | Default 15000                        |
+| `TEAMS_CHAT_URL`                                     | nein         | Deep Link für „Capture in Teams"     |
 
 Kein `NEXT_PUBLIC_*`: alle Aufrufe passieren serverseitig, weder Token noch
 interne Adressen erreichen den Browser.

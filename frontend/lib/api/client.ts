@@ -27,7 +27,26 @@
 import "server-only";
 import { auth } from "@/auth";
 
+/**
+ * Die Basis-URL des Dienstes - und ob sie ueberhaupt konfiguriert ist.
+ *
+ * Der Default ist eine Bequemlichkeit fuer die lokale Entwicklung und war in
+ * der ersten Fassung eine Falle: fehlte API_URL im Deployment, lief jeder
+ * Aufruf gegen localhost und die Oberflaeche meldete "der Dienst antwortet
+ * nicht". Das ist die falsche Diagnose fuer eine nicht gesetzte Variable, und
+ * sie kostet Stunden. Deshalb wird der Unterschied hier festgehalten und in
+ * /api/healthz sichtbar gemacht.
+ */
+const API_CONFIGURED = !!process.env.API_URL;
 const API_URL = (process.env.API_URL ?? "http://localhost:4000").replace(/\/+$/, "");
+
+/** Was /api/healthz ueber die Verbindung zum Dienst berichtet. */
+export type ApiReachability = {
+  url: string;
+  configured: boolean;
+  reachable: boolean;
+  error?: string;
+};
 
 /** Wie lange auf den Dienst gewartet wird, bevor die Seite einen Fehler zeigt. */
 const TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS) || 15_000;
@@ -148,11 +167,25 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   return payload as T;
 }
 
-/** Fuer /api/healthz: erreicht diese Instanz den Belegdienst? Ohne Anmeldung. */
-export async function pingApi(): Promise<void> {
-  const response = await fetch(`${API_URL}/healthz`, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`Receipt service unhealthy: HTTP ${response.status}`);
+/**
+ * Fuer /api/healthz: erreicht diese Instanz den Belegdienst? Ohne Anmeldung.
+ *
+ * Wirft nicht, sondern berichtet: der Aufrufer entscheidet, ob daraus ein
+ * roter Healthcheck wird. Siehe app/api/healthz/route.ts - die beiden Faelle
+ * "Variable fehlt" und "Dienst gerade weg" verlangen verschiedene Antworten.
+ */
+export async function pingApi(): Promise<ApiReachability> {
+  const base: ApiReachability = { url: API_URL, configured: API_CONFIGURED, reachable: false };
+
+  try {
+    const response = await fetch(`${API_URL}/healthz`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return response.ok
+      ? { ...base, reachable: true }
+      : { ...base, error: `HTTP ${response.status} ${response.statusText}` };
+  } catch (error) {
+    return { ...base, error: error instanceof Error ? error.message : String(error) };
+  }
 }
