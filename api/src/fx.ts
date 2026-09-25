@@ -100,6 +100,13 @@ export async function ensureRates(userId: string, settlementIds: string[]): Prom
             misses.delete(keyOf(request));
           } else {
             misses.set(keyOf(request), Date.now());
+            // Sichtbar machen: ein frisch gestarteter Frankfurter liefert
+            // waehrend seines ersten Backfills (Stunden) fuer JEDES Paar 404,
+            // und ohne diese Zeile sieht das im Log aus wie "alles gut".
+            console.warn(
+              `[api] Frankfurter hat keinen Kurs fuer ${keyOf(request)} ` +
+                '(404/422 - Backfill noch nicht durch oder Waehrung unbekannt).',
+            );
           }
         } catch (error) {
           if (deadline.aborted) return;

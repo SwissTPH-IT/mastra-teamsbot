@@ -43,6 +43,9 @@ export default defineRailway(() => {
     env: {
       PORT: "8080",
       DATABASE_URL: "sqlite:///app/data/frankfurter.sqlite3",
+      // Das Image laeuft als uid 1000, Railway haengt Volumes root-owned ein:
+      // ohne das scheitert db:setup mit SQLite3::CantOpenException.
+      RAILWAY_RUN_UID: "0",
     },
   });
 
